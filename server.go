@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
+
+const defaultNumberOfOutputs = 2000
 
 type server struct {
 	port int
@@ -37,11 +40,27 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	limit := defaultNumberOfOutputs
+	if limitParam := r.URL.Query().Get("limit"); limitParam != "" {
+		if limit, err = strconv.Atoi(limitParam); err != nil {
+			http.Error(w, fmt.Sprintf("error converting 'limit' param %s: %v", limitParam, err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	var count int
 	var lines []string
+
+repoTags:
 	for repoName, tags := range s.idx.repoTags {
 		for _, tag := range tags {
 			if tag.commitDate.Before(since) {
 				continue
+			}
+
+			count += 1
+			if count > limit {
+				break repoTags
 			}
 
 			out, err := json.Marshal(&module{
@@ -57,6 +76,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			lines = append(lines, string(out))
 		}
 	}
+
 	if _, err := fmt.Fprint(w, strings.Join(lines, "\n")); err != nil {
 		http.Error(w, fmt.Sprintf("error writing response: %v", err), http.StatusInternalServerError)
 		return
