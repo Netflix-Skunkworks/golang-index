@@ -22,6 +22,7 @@ func TestIndexHandler(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		sinceParam     string
+		limitParam     string
 		tags           map[string][]*repoTag
 		wantStatusCode int
 		wantResponse   string
@@ -54,6 +55,27 @@ func TestIndexHandler(t *testing.T) {
 			tags:           fakedRepos,
 			wantStatusCode: http.StatusBadRequest,
 		},
+		{
+			name:           "with 'limit' query param",
+			limitParam:     "1",
+			tags:           fakedRepos,
+			wantStatusCode: http.StatusOK,
+			wantResponse:   `{"Path":"github.netflix.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}`,
+		},
+		{
+			name:           "with invalid 'limit' query param",
+			limitParam:     "invalid",
+			tags:           fakedRepos,
+			wantStatusCode: http.StatusBadRequest,
+		},
+		{
+			name:           "with both 'limit' and 'since' query params",
+			sinceParam:     "2025-02-01T00:00:00Z",
+			limitParam:     "1",
+			tags:           fakedRepos,
+			wantStatusCode: http.StatusOK,
+			wantResponse:   `{"Path":"github.netflix.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newServer(0, &index{repoTags: tc.tags})
@@ -62,6 +84,9 @@ func TestIndexHandler(t *testing.T) {
 			query := request.URL.Query()
 			if tc.sinceParam != "" {
 				query.Add("since", tc.sinceParam)
+			}
+			if tc.limitParam != "" {
+				query.Add("limit", tc.limitParam)
 			}
 			request.URL.RawQuery = query.Encode()
 
