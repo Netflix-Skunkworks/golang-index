@@ -19,6 +19,7 @@ func TestIndexHandler(t *testing.T) {
 	tests := []struct {
 		name           string
 		sinceParam     string
+		limitParam     string
 		tags           map[string][]*repoTag
 		wantStatusCode int
 		wantResponse   string
@@ -99,6 +100,73 @@ func TestIndexHandler(t *testing.T) {
 			wantStatusCode: http.StatusBadRequest,
 			wantResponse:   "",
 		},
+		{
+			name:       "with 'limit' query param",
+			limitParam: "1",
+			tags: map[string][]*repoTag{
+				"repo1": []*repoTag{
+					{
+						tag:        "tag1",
+						commitDate: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC),
+					},
+					{
+						tag:        "tag2",
+						commitDate: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC),
+					},
+					{
+						tag:        "tag3",
+						commitDate: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC),
+					},
+				},
+			},
+			wantStatusCode: http.StatusOK,
+			wantResponse:   `{"Path":"github.netflix.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}`,
+		},
+		{
+			name:       "with invalid 'limt' query param",
+			limitParam: "invalid",
+			tags: map[string][]*repoTag{
+				"repo1": []*repoTag{
+					{
+						tag:        "tag1",
+						commitDate: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC),
+					},
+					{
+						tag:        "tag2",
+						commitDate: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC),
+					},
+					{
+						tag:        "tag3",
+						commitDate: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC),
+					},
+				},
+			},
+			wantStatusCode: http.StatusBadRequest,
+		},
+		{
+			name:       "with both limit and since query params",
+			sinceParam: "2025-02-01T00:00:00Z",
+			limitParam: "1",
+			tags: map[string][]*repoTag{
+				"repo1": []*repoTag{
+					{
+						tag:        "tag1",
+						commitDate: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC),
+					},
+					{
+						tag:        "tag2",
+						commitDate: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC),
+					},
+					{
+						tag:        "tag3",
+						commitDate: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC),
+					},
+				},
+			},
+			wantStatusCode: http.StatusOK,
+			wantResponse: "" +
+				`{"Path":"github.netflix.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -108,7 +176,12 @@ func TestIndexHandler(t *testing.T) {
 			recorder := httptest.NewRecorder()
 
 			query := request.URL.Query()
-			query.Add("since", tt.sinceParam)
+			if tt.sinceParam != "" {
+				query.Add("since", tt.sinceParam)
+			}
+			if tt.limitParam != "" {
+				query.Add("limit", tt.limitParam)
+			}
 			request.URL.RawQuery = query.Encode()
 
 			s.handleIndex(recorder, request)

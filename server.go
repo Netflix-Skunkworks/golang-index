@@ -5,8 +5,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	defaultLimit = 2000
 )
 
 type server struct {
@@ -41,11 +46,29 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	limit := defaultLimit
+	if limitParam := r.URL.Query().Get("limit"); limitParam != "" {
+		limit, err = strconv.Atoi(limitParam)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(fmt.Sprintf("error converting 'limit' param %s: %v", limitParam, err)))
+			return
+		}
+	}
+
+	count := 0
+
+repoTags:
 	for repoName, tags := range s.idx.repoTags {
 		for _, tag := range tags {
 			timestamp := tag.commitDate
 			if !since.IsZero() && timestamp.Before(since) {
 				continue
+			}
+
+			count += 1
+			if count > limit {
+				break repoTags
 			}
 
 			jo := JSONOut{Path: fmt.Sprintf("github.netflix.net/%s", repoName), Version: tag.tag, Timestamp: timestamp.Format(time.RFC3339)}
@@ -59,6 +82,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			lines = append(lines, string(out))
 		}
 	}
+
 	if _, err := w.Write([]byte(strings.Join(lines, "\n"))); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(fmt.Sprintf("error writing response: %v", err)))
