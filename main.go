@@ -31,21 +31,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	i, err := newIndex(ctx)
-	if err != nil {
-		fmt.Println(fmt.Errorf("error instantiating index: %v", err))
-		os.Exit(1)
-	}
+	index := newIndex(ctx)
 
 	// TODO(jeanbza): This should re-run periodically.
 	repoNames := make(chan string, 2*githubResultsPerPage)
 	grp, grpCtx := errgroup.WithContext(ctx)
 	grp.Go(func() error {
-		return i.repos(grpCtx, repoNames)
+		return index.repos(grpCtx, repoNames)
 	})
 	for j := 0; j < tagWorkers; j++ {
 		grp.Go(func() error {
-			return i.tagsForRepos(grpCtx, repoNames)
+			return index.tagsForRepos(grpCtx, repoNames)
 		})
 	}
 	if err := grp.Wait(); err != nil {
@@ -53,8 +49,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	s := newServer(*port, i)
-	if err = s.listenAndServe(); err != nil {
+	s := newServer(*port, index)
+	if err := s.listenAndServe(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -78,27 +74,15 @@ type index struct {
 	repoTags map[string][]*repoTag
 }
 
-func newIndex(ctx context.Context) (*index, error) {
-	client := github.NewClient(nil)
-	client, err := client.WithEnterpriseURLs(fmt.Sprintf("https://%s/api/v3/", *githubHostName), fmt.Sprintf("https://%s/api/uploads/", *githubHostName))
-	if err != nil {
-		return nil, fmt.Errorf("unable to start an enterprise client: %w", err)
-	}
-	client = client.WithAuthToken(*githubAuthToken)
-
-	fullHost := fmt.Sprintf("https://%s/api/graphql", *githubHostName)
-	src := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: *githubAuthToken},
+func newIndex(ctx context.Context) *index {
+	httpClient := oauth2.NewClient(
+		ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: *githubAuthToken}),
 	)
-	httpClient := oauth2.NewClient(ctx, src)
-	graphqlClient := githubv4.NewEnterpriseClient(fullHost, httpClient)
+	graphqlClient := githubv4.NewEnterpriseClient(
+		fmt.Sprintf("https://%s/api/graphql", *githubHostName), httpClient,
+	)
 
-	return &index{
-		restClient:    client,
-		graphqlClient: graphqlClient,
-
-		repoTags: make(map[string][]*repoTag),
-	}, nil
+	return &index{graphqlClient: graphqlClient, repoTags: make(map[string][]*repoTag)}
 }
 
 // Get all the repos.
@@ -107,26 +91,46 @@ func newIndex(ctx context.Context) (*index, error) {
 func (i *index) repos(ctx context.Context, results chan<- string) error {
 	defer close(results)
 
-	// list public repositories for org "github"
-
-	opt := &github.SearchOptions{
-		ListOptions: github.ListOptions{PerPage: githubResultsPerPage},
+	var q struct {
+		Search struct {
+			Edges []struct {
+				Node struct {
+					Repo struct {
+						URL githubv4.URI
+					} `graphql:"... on Repository"`
+				}
+			}
+			PageInfo struct {
+				EndCursor   githubv4.String
+				HasNextPage bool
+			}
+		} `graphql:"search(query: $query, type: REPOSITORY, first: 100, after: $tagsCursor)"`
 	}
-	// get all pages of results
+
+	variables := map[string]interface{}{
+		"query":      githubv4.String("language:golang"),
+		"tagsCursor": (*githubv4.String)(nil),
+	}
+
 	for {
-		repos, resp, err := i.restClient.Search.Repositories(ctx, "language:golang", opt)
-		if err != nil {
-			return err
+		if err := i.graphqlClient.Query(ctx, &q, variables); err != nil {
+			return fmt.Errorf("error querying repositories: %w", err)
 		}
-		fmt.Printf("received %d repo results from github!\n", len(repos.Repositories))
-		for _, r := range repos.Repositories {
-			results <- *r.FullName
+
+		fmt.Printf("received %d repo results from github!\n", len(q.Search.Edges))
+
+		for _, edge := range q.Search.Edges {
+			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.URL.String()), "https://github.netflix.net/")
+			results <- string(corpName)
 		}
-		if resp.NextPage == 0 {
+
+		if !q.Search.PageInfo.HasNextPage {
 			break
 		}
-		opt.Page = resp.NextPage
+
+		variables["tagsCursor"] = githubv4.NewString(q.Search.PageInfo.EndCursor)
 	}
+
 	return nil
 }
 
