@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -24,12 +21,6 @@ var githubAuthToken = flag.String("githubAuthToken", "", "github auth token")
 
 const githubResultsPerPage = 100
 const tagWorkers = 10
-
-type JSONOut struct {
-	Path      string `json:"Path"`
-	Version   string `json:"Version"`
-	Timestamp string `json:"Timestamp"`
-}
 
 func main() {
 	flag.Parse()
@@ -62,29 +53,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		var lines []string
-
-		i.mu.Lock()
-		defer i.mu.Unlock()
-		for repoName, tags := range i.repoTags {
-			for _, tag := range tags {
-				jo := JSONOut{Path: fmt.Sprintf("github.netflix.net/%s", repoName), Version: tag.tag, Timestamp: tag.commitDate.Format(time.RFC3339)}
-				out, err := json.Marshal(&jo)
-				if err != nil {
-					panic(err)
-				}
-				lines = append(lines, string(out))
-			}
-		}
-		if _, err := w.Write([]byte(strings.Join(lines, "\n"))); err != nil {
-			panic(err)
-		}
-	})
-
-	fmt.Printf("Server listening on :%d\n", port)
-	// log.Fatal(http.ListenAndServeTLS(fmt.Sprintf(":%d", port), "host.cert", "host.key", nil))
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
+	s := newServer(*port, i)
+	s.listenAndServe()
 }
 
 type repoTag struct {
@@ -100,7 +70,7 @@ type index struct {
 	// v4 API
 	graphqlClient *githubv4.Client
 
-	mu sync.Mutex
+	mu sync.RWMutex
 	// Map of repo name to tags.
 	repoTags map[string][]*repoTag
 }
