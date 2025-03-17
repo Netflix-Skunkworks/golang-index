@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -25,8 +24,6 @@ type JSONOut struct {
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	var lines []string
-
 	s.idx.mu.RLock()
 	defer s.idx.mu.RUnlock()
 
@@ -35,39 +32,39 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if sinceParam := r.URL.Query().Get("since"); sinceParam != "" {
 		since, err = time.Parse(time.RFC3339, sinceParam)
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(fmt.Sprintf("error converting 'since' param %s: %v", sinceParam, err)))
+			http.Error(w, fmt.Sprintf("error converting 'since' param %s: %v", sinceParam, err), http.StatusBadRequest)
 			return
 		}
 	}
 
+	var lines []string
 	for repoName, tags := range s.idx.repoTags {
 		for _, tag := range tags {
-			timestamp := tag.commitDate
-			if !since.IsZero() && timestamp.Before(since) {
+			if tag.commitDate.Before(since) {
 				continue
 			}
 
-			jo := JSONOut{Path: fmt.Sprintf("github.netflix.net/%s", repoName), Version: tag.tag, Timestamp: timestamp.Format(time.RFC3339)}
-			out, err := json.Marshal(&jo)
+			out, err := json.Marshal(&JSONOut{
+				Path:      fmt.Sprintf("github.netflix.net/%s", repoName),
+				Version:   tag.tag,
+				Timestamp: tag.commitDate.Format(time.RFC3339),
+			})
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(fmt.Sprintf("error marshalling response for tag %s: %v", tag.tag, err)))
+				http.Error(w, fmt.Sprintf("error marshalling response for tag %s: %v", tag.tag, err), http.StatusInternalServerError)
 				return
 			}
 
 			lines = append(lines, string(out))
 		}
 	}
-	if _, err := w.Write([]byte(strings.Join(lines, "\n"))); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(fmt.Sprintf("error writing response: %v", err)))
+	if _, err := fmt.Fprint(w, strings.Join(lines, "\n")); err != nil {
+		http.Error(w, fmt.Sprintf("error writing response: %v", err), http.StatusInternalServerError)
 		return
 	}
 }
 
-func (s *server) listenAndServe() {
+func (s *server) listenAndServe() error {
 	http.HandleFunc("/", s.handleIndex)
 	fmt.Printf("Server listening on :%d\n", s.port)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", s.port), nil))
+	return http.ListenAndServe(fmt.Sprintf(":%d", s.port), nil)
 }

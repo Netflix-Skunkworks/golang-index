@@ -54,7 +54,11 @@ func main() {
 	}
 
 	s := newServer(*port, i)
-	s.listenAndServe()
+	err = s.listenAndServe()
+	if err != nil {
+		fmt.Printf("error creating the server: %v", err)
+		os.Exit(1)
+	}
 }
 
 type repoTag struct {

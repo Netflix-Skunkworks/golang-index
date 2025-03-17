@@ -7,16 +7,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestIndexHandler(t *testing.T) {
-	jan := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
-	feb := time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)
-	mar := time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)
+	fakedRepos := map[string][]*repoTag{
+		"repo1": []*repoTag{
+			{tag: "tag1", commitDate: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
+			{tag: "tag2", commitDate: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
+			{tag: "tag3", commitDate: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
+		},
+	}
 
-	tests := []struct {
+	for _, tc := range []struct {
 		name           string
 		sinceParam     string
 		tags           map[string][]*repoTag
@@ -25,19 +28,11 @@ func TestIndexHandler(t *testing.T) {
 	}{
 		{
 			name:           "empty response",
-			tags:           map[string][]*repoTag{},
 			wantStatusCode: http.StatusOK,
-			wantResponse:   "",
 		},
 		{
-			name: "response with tags",
-			tags: map[string][]*repoTag{
-				"repo1": []*repoTag{
-					{tag: "tag1", commitDate: jan},
-					{tag: "tag2", commitDate: feb},
-					{tag: "tag3", commitDate: mar},
-				},
-			},
+			name:           "response with tags",
+			tags:           fakedRepos,
 			wantStatusCode: http.StatusOK,
 			wantResponse: "" +
 				`{"Path":"github.netflix.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}` + "\n" +
@@ -45,52 +40,46 @@ func TestIndexHandler(t *testing.T) {
 				`{"Path":"github.netflix.net/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
 		},
 		{
-			name:       "with 'since' query param",
-			sinceParam: "2025-02-01T00:00:00Z",
-			tags: map[string][]*repoTag{
-				"repo1": []*repoTag{
-					{tag: "tag1", commitDate: jan},
-					{tag: "tag2", commitDate: feb},
-					{tag: "tag3", commitDate: mar},
-				},
-			},
+			name:           "with 'since' query param",
+			sinceParam:     "2025-02-01T00:00:00Z",
+			tags:           fakedRepos,
 			wantStatusCode: http.StatusOK,
 			wantResponse: "" +
 				`{"Path":"github.netflix.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}` + "\n" +
 				`{"Path":"github.netflix.net/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
 		},
 		{
-			name:       "with invalid 'since' query param",
-			sinceParam: "invalid",
-			tags: map[string][]*repoTag{
-				"repo1": []*repoTag{
-					{tag: "tag1", commitDate: jan},
-					{tag: "tag2", commitDate: feb},
-					{tag: "tag3", commitDate: mar},
-				},
-			},
+			name:           "with invalid 'since' query param",
+			sinceParam:     "invalid",
+			tags:           fakedRepos,
 			wantStatusCode: http.StatusBadRequest,
-			wantResponse:   "",
 		},
-	}
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newServer(0, &index{repoTags: tc.tags})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newServer(0, &index{repoTags: tt.tags})
 			request := httptest.NewRequest(http.MethodGet, "/", nil)
-			recorder := httptest.NewRecorder()
-
 			query := request.URL.Query()
-			query.Add("since", tt.sinceParam)
+			if tc.sinceParam != "" {
+				query.Add("since", tc.sinceParam)
+			}
 			request.URL.RawQuery = query.Encode()
+
+			recorder := httptest.NewRecorder()
 
 			s.handleIndex(recorder, request)
 
-			assert.Equal(t, tt.wantStatusCode, recorder.Code)
-			if tt.wantStatusCode == http.StatusOK {
+			if tc.wantStatusCode != recorder.Code {
+				t.Errorf("wanted status code %d, got %d", tc.wantStatusCode, recorder.Code)
+			}
+			if tc.wantStatusCode == http.StatusOK {
 				body, err := io.ReadAll(recorder.Body)
-				require.NoError(t, err)
-				assert.Equal(t, tt.wantResponse, string(body))
+				if err != nil {
+					t.Errorf("unexpected error while reading recorder body: %v", err)
+				}
+				if tc.wantResponse != string(body) {
+					t.Errorf("response body didn't match expected response body. Diff: %v", cmp.Diff(tc.wantResponse, string(body)))
+				}
 			}
 		})
 	}
