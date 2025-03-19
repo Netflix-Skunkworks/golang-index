@@ -17,7 +17,7 @@ func newServer(port int, index *index) *server {
 	return &server{port: port, idx: index}
 }
 
-type JSONOut struct {
+type module struct {
 	Path      string `json:"Path"`
 	Version   string `json:"Version"`
 	Timestamp string `json:"Timestamp"`
@@ -44,7 +44,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			out, err := json.Marshal(&JSONOut{
+			out, err := json.Marshal(&module{
 				Path:      fmt.Sprintf("github.netflix.net/%s", repoName),
 				Version:   tag.tag,
 				Timestamp: tag.commitDate.Format(time.RFC3339),

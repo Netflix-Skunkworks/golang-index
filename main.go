@@ -54,9 +54,8 @@ func main() {
 	}
 
 	s := newServer(*port, i)
-	err = s.listenAndServe()
-	if err != nil {
-		fmt.Printf("error creating the server: %v", err)
+	if err = s.listenAndServe(); err != nil {
+		fmt.Println("error creating the server: ", err)
 		os.Exit(1)
 	}
 }
