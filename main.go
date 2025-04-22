@@ -32,7 +32,7 @@ func main() {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: *githubAuthToken})
 	graphqlClient := githubv4.NewEnterpriseClient(fullHost, oauth2.NewClient(ctx, src))
 
-	index := newIndex(ctx, graphqlClient)
+	index := newIndex(graphqlClient)
 
 	// TODO(jeanbza): This should re-run periodically.
 	repoNames := make(chan string, 2*githubResultsPerPage)

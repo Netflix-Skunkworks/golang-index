@@ -11,7 +11,7 @@ import (
 )
 
 type githubClient interface {
-	Query(ctx context.Context, q interface{}, variables map[string]interface{}) error
+	Query(ctx context.Context, query interface{}, variables map[string]interface{}) error
 }
 
 type index struct {
@@ -28,7 +28,7 @@ type repoTag struct {
 	commitDate time.Time
 }
 
-func newIndex(ctx context.Context, client githubClient) *index {
+func newIndex(client githubClient) *index {
 	return &index{
 		graphqlClient: client,
 		repoTags:      make(map[string][]*repoTag),
