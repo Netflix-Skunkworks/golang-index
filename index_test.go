@@ -40,9 +40,12 @@ func (m *mockGithubClient) Query(ctx context.Context, query interface{}, variabl
 
 func TestRepos_EmptyResponse(t *testing.T) {
 	index := newIndex(&mockGithubClient{})
-	resultsChan := make(chan string, 0)
+	resultsChan := make(chan string)
 
-	index.repos(t.Context(), resultsChan)
+	err := index.repos(t.Context(), resultsChan)
+	if err != nil {
+		t.Fatalf("unexpected error generating tags for repos: %v", err)
+	}
 
 	if len(resultsChan) != 0 {
 		t.Errorf("expected channel to be empty but it has %d results", len(resultsChan))
@@ -91,7 +94,10 @@ func TestRepos_MultiplePages(t *testing.T) {
 	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
 	resultsChan := make(chan string, len(wantResults))
 
-	index.repos(t.Context(), resultsChan)
+	err := index.repos(t.Context(), resultsChan)
+	if err != nil {
+		t.Fatalf("unexpected error generating tags for repos: %v", err)
+	}
 
 	var results []string
 	for r := range resultsChan {

@@ -97,7 +97,7 @@ func (i *index) repos(ctx context.Context, results chan<- string) error {
 		fmt.Printf("received %d repo results from github!\n", len(q.Search.Edges))
 
 		for _, edge := range q.Search.Edges {
-			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.URL.String()), "https://github.netflix.net/")
+			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.String()), "https://github.netflix.net/")
 			results <- string(corpName)
 		}
 
