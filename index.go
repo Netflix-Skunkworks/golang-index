@@ -8,7 +8,11 @@ import (
 	"time"
 
 	"github.com/shurcooL/githubv4"
+	"golang.org/x/sync/errgroup"
 )
+
+const githubResultsPerPage = 100
+const tagWorkers = 10
 
 type githubClient interface {
 	Query(ctx context.Context, query interface{}, variables map[string]interface{}) error
@@ -33,6 +37,23 @@ func newIndex(client githubClient) *index {
 		graphqlClient: client,
 		repoTags:      make(map[string][]*repoTag),
 	}
+}
+
+// build goes through all of the Go repos and indexes their tags.
+func (i *index) build(ctx context.Context) error {
+	grp, grpCtx := errgroup.WithContext(ctx)
+
+	repoNames := make(chan string, 2*githubResultsPerPage)
+	grp.Go(func() error {
+		return i.repos(grpCtx, repoNames)
+	})
+	for j := 0; j < tagWorkers; j++ {
+		grp.Go(func() error {
+			return i.tagsForRepos(grpCtx, repoNames)
+		})
+	}
+
+	return grp.Wait()
 }
 
 type repoQueryResult struct {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -13,7 +14,9 @@ const defaultNumberOfOutputs = 2000
 
 type server struct {
 	port int
-	idx  *index
+
+	mu  sync.RWMutex
+	idx *index
 }
 
 func newServer(port int, index *index) *server {
@@ -27,6 +30,9 @@ type module struct {
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	s.idx.mu.RLock()
 	defer s.idx.mu.RUnlock()
 
@@ -81,6 +87,13 @@ repoTags:
 		http.Error(w, fmt.Sprintf("error writing response: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *server) updateIndex(newIndex *index) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.idx = newIndex
 }
 
 func (s *server) listenAndServe() error {

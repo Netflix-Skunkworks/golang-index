@@ -5,18 +5,16 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
-	"golang.org/x/sync/errgroup"
 )
 
 var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
 var githubAuthToken = flag.String("githubAuthToken", "", "github auth token")
-
-const githubResultsPerPage = 100
-const tagWorkers = 10
+var reindexIntervalHours = flag.Int("reindexHours", 12, "number of hours to wait between each re-indexing")
 
 func main() {
 	flag.Parse()
@@ -27,30 +25,34 @@ func main() {
 	}
 
 	ctx := context.Background()
-
 	fullHost := fmt.Sprintf("https://%s/api/graphql", *githubHostName)
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: *githubAuthToken})
 	graphqlClient := githubv4.NewEnterpriseClient(fullHost, oauth2.NewClient(ctx, src))
 
 	index := newIndex(graphqlClient)
-
-	// TODO(jeanbza): This should re-run periodically.
-	repoNames := make(chan string, 2*githubResultsPerPage)
-	grp, grpCtx := errgroup.WithContext(ctx)
-	grp.Go(func() error {
-		return index.repos(grpCtx, repoNames)
-	})
-	for j := 0; j < tagWorkers; j++ {
-		grp.Go(func() error {
-			return index.tagsForRepos(grpCtx, repoNames)
-		})
-	}
-	if err := grp.Wait(); err != nil {
+	if err := index.build(ctx); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 
 	server := newServer(*port, index)
+
+	ticker := time.NewTicker(time.Duration(*reindexIntervalHours) * time.Hour)
+	go func() {
+		for range ticker.C {
+			fmt.Println("starting new reindexing")
+
+			updatedIndex := newIndex(graphqlClient)
+			if err := updatedIndex.build(ctx); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+			server.updateIndex(updatedIndex)
+
+			fmt.Println("updated server index")
+		}
+	}()
+
 	if err := server.listenAndServe(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
