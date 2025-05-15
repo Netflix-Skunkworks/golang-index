@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/go-github/v68/github"
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
@@ -62,10 +61,6 @@ type repoTag struct {
 }
 
 type index struct {
-	// v3 API
-	// TODO(jeanbza): Re-write all rest client calls with the graphql client
-	// to simplify.
-	restClient *github.Client
 	// v4 API
 	graphqlClient *githubv4.Client
 
@@ -120,7 +115,7 @@ func (i *index) repos(ctx context.Context, results chan<- string) error {
 		fmt.Printf("received %d repo results from github!\n", len(q.Search.Edges))
 
 		for _, edge := range q.Search.Edges {
-			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.URL.String()), "https://github.netflix.net/")
+			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.String()), "https://github.netflix.net/")
 			results <- string(corpName)
 		}
 
