@@ -14,7 +14,7 @@ import (
 var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
 var githubAuthToken = flag.String("githubAuthToken", "", "github auth token")
-var reindexIntervalHours = flag.Int("reindexHours", 12, "number of hours to wait between each re-indexing")
+var reindexPeriod = flag.Duration("reindexPeriod", 12*time.Hour, "time hours to wait between each re-indexing")
 
 func main() {
 	flag.Parse()
@@ -37,7 +37,7 @@ func main() {
 
 	server := newServer(*port, index)
 
-	ticker := time.NewTicker(time.Duration(*reindexIntervalHours) * time.Hour)
+	ticker := time.NewTicker(*reindexPeriod)
 	go func() {
 		for range ticker.C {
 			fmt.Println("starting new reindexing")
