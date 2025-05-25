@@ -16,10 +16,10 @@ type mockGithubClient struct {
 	resultsIdx int
 
 	// stubbed results for queries
-	stubbedResults []interface{}
+	stubbedResults []any
 }
 
-func (m *mockGithubClient) Query(ctx context.Context, query interface{}, variables map[string]interface{}) error {
+func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[string]any) error {
 	if len(m.stubbedResults) == 0 {
 		return nil
 	}
@@ -42,9 +42,8 @@ func TestRepos_EmptyResponse(t *testing.T) {
 	index := newIndex(&mockGithubClient{})
 	resultsChan := make(chan string)
 
-	err := index.repos(t.Context(), resultsChan)
-	if err != nil {
-		t.Fatalf("unexpected error listing repos: %v", err)
+	if err := index.repos(t.Context(), resultsChan); err != nil {
+		t.Fatal(err)
 	}
 
 	if len(resultsChan) != 0 {
@@ -76,10 +75,22 @@ func TestRepos_MultiplePages(t *testing.T) {
 		},
 	}
 
-	var stubbedResponses []interface{}
+	var stubbedResponses []any
 	for _, response := range responses {
-		response := buildRepoQueryResponse(t, response.reposURLs, response.endCursor, response.hasNextPage)
+		response := buildRepoQueryResult(t, response.reposURLs, response.endCursor, response.hasNextPage)
 		stubbedResponses = append(stubbedResponses, response)
+	}
+
+	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
+	resultsChan := make(chan string, 100)
+
+	if err := index.repos(t.Context(), resultsChan); err != nil {
+		t.Fatal(err)
+	}
+
+	var results []string
+	for r := range resultsChan {
+		results = append(results, r)
 	}
 
 	wantResults := []string{
@@ -89,19 +100,6 @@ func TestRepos_MultiplePages(t *testing.T) {
 		"corp/cloudgaming-tdd-grafana",
 		"corp/cloudgaming-game-input-go",
 		"corp/cpie-proxyd",
-	}
-
-	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
-	resultsChan := make(chan string, len(wantResults))
-
-	err := index.repos(t.Context(), resultsChan)
-	if err != nil {
-		t.Fatalf("unexpected error listing repos: %v", err)
-	}
-
-	var results []string
-	for r := range resultsChan {
-		results = append(results, r)
 	}
 
 	if diff := cmp.Diff(wantResults, results); diff != "" {
@@ -115,9 +113,8 @@ func TestTagsForRepos_EmptyResponse(t *testing.T) {
 	close(repos)
 
 	index := newIndex(&mockGithubClient{})
-	err := index.tagsForRepos(t.Context(), repos)
-	if err != nil {
-		t.Fatalf("unexpected error generating tags for repos: %v", err)
+	if err := index.tagsForRepos(t.Context(), repos); err != nil {
+		t.Fatal(err)
 	}
 
 	gotTags := index.repoTags["corp/repo1"]
@@ -152,17 +149,13 @@ func TestTagsForRepos_MultiplePages(t *testing.T) {
 		},
 	}
 
-	repos := make(chan string, 1)
-	repos <- "corp/repo1"
-	close(repos)
-
-	var stubbedResponses []interface{}
+	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagsQueryResponse(response.tags, response.endCursor, response.hasNextPage))
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, response.endCursor, response.hasNextPage))
 	}
 
 	wantTags := map[string][]*repoTag{
-		"corp/repo1": []*repoTag{
+		"corp/repo1": {
 			{tag: "_gheMigrationPR-435", commitDate: date},
 			{tag: "_gheMigrationPR-436", commitDate: date},
 			{tag: "_gheMigrationPR-437", commitDate: date},
@@ -172,10 +165,13 @@ func TestTagsForRepos_MultiplePages(t *testing.T) {
 		},
 	}
 
+	repos := make(chan string, 1)
+	repos <- "corp/repo1"
+	close(repos)
+
 	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
-	err := index.tagsForRepos(t.Context(), repos)
-	if err != nil {
-		t.Fatalf("unexpected error generating tags for repos: %v", err)
+	if err := index.tagsForRepos(t.Context(), repos); err != nil {
+		t.Fatal(err)
 	}
 
 	if !cmp.Equal(wantTags, index.repoTags, cmp.AllowUnexported(repoTag{})) {
@@ -183,7 +179,7 @@ func TestTagsForRepos_MultiplePages(t *testing.T) {
 	}
 }
 
-func buildRepoQueryResponse(t *testing.T, reposURLs []string, endCursor githubv4.String, hasNextPage bool) repoQueryResult {
+func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.String, hasNextPage bool) repoQueryResult {
 	t.Helper()
 
 	var edges []repoQueryEdge
@@ -206,7 +202,7 @@ func buildRepoQueryResponse(t *testing.T, reposURLs []string, endCursor githubv4
 	return q
 }
 
-func buildTagsQueryResponse(tags []repoTag, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
+func buildTagQueryResponse(tags []repoTag, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
 	var edges []tagQueryEdge
 
 	for _, tag := range tags {

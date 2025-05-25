@@ -10,8 +10,11 @@ import (
 	"github.com/shurcooL/githubv4"
 )
 
+// githubClient wraps query interface from the shurcooL/githubv4 package so
+// that we can mock github graphql query responses in tests.
 type githubClient interface {
-	Query(ctx context.Context, query interface{}, variables map[string]interface{}) error
+	// Matches https://pkg.go.dev/github.com/shurcooL/githubv4#Client.Query
+	Query(ctx context.Context, query any, variables map[string]any) error
 }
 
 type index struct {
@@ -63,7 +66,7 @@ func (i *index) repos(ctx context.Context, results chan<- string) error {
 
 	var q repoQueryResult
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"query":      githubv4.String("language:golang"),
 		"tagsCursor": (*githubv4.String)(nil),
 	}
@@ -148,7 +151,7 @@ func (i *index) tagsForRepo(ctx context.Context, repoName string) ([]*repoTag, e
 		return nil, fmt.Errorf("expected org/name format, but got %d parts from %s", len(parts), repoName)
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"repoOrg":    githubv4.String(parts[0]),
 		"repoName":   githubv4.String(parts[1]),
 		"tagsCursor": (*githubv4.String)(nil),
