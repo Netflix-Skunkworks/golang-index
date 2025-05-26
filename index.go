@@ -31,8 +31,8 @@ type index struct {
 }
 
 type repoTag struct {
-	tag        string
-	commitDate time.Time
+	tag     string
+	tagDate time.Time
 }
 
 func newIndex(client githubClient) *index {
@@ -157,9 +157,13 @@ type tagQueryEdge struct {
 		Name   githubv4.String
 		Target struct {
 			Commit struct {
-				AbbreviatedOid githubv4.String
-				CommittedDate  githubv4.DateTime
+				CommittedDate githubv4.DateTime
 			} `graphql:"... on Commit"`
+			Tag struct {
+				Tagger struct {
+					Date githubv4.DateTime
+				}
+			} `graphql:"... on Tag"`
 		}
 	}
 }
@@ -185,7 +189,15 @@ func (i *index) tagsForRepo(ctx context.Context, repoName string) ([]*repoTag, e
 			return nil, fmt.Errorf("error querying tags for %s: %w", repoName, err)
 		}
 		for _, t := range q.Repository.Refs.Edges {
-			tags = append(tags, &repoTag{tag: string(t.Node.Name), commitDate: t.Node.Target.Commit.CommittedDate.Time})
+			var tag repoTag
+			tag.tag = string(t.Node.Name)
+			if !t.Node.Target.Commit.CommittedDate.IsZero() {
+				tag.tagDate = t.Node.Target.Commit.CommittedDate.Time
+			} else if !t.Node.Target.Tag.Tagger.Date.IsZero() {
+				tag.tagDate = t.Node.Target.Tag.Tagger.Date.Time
+			}
+
+			tags = append(tags, &tag)
 		}
 		if !q.Repository.Refs.PageInfo.HasNextPage {
 			break

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/shurcooL/githubv4"
 )
 
@@ -127,24 +128,24 @@ func TestTagsForRepos_EmptyResponse(t *testing.T) {
 func TestTagsForRepos_MultiplePages(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
 	responses := []struct {
-		tags        []repoTag
+		tags        []tagResponse
 		endCursor   githubv4.String
 		hasNextPage bool
 	}{
 		{
-			tags: []repoTag{
-				{tag: "_gheMigrationPR-435", commitDate: date},
-				{tag: "_gheMigrationPR-436", commitDate: date},
-				{tag: "_gheMigrationPR-437", commitDate: date},
+			tags: []tagResponse{
+				{tag: "_gheMigrationPR-435", committedDate: date},
+				{tag: "_gheMigrationPR-436", committedDate: date},
+				{tag: "_gheMigrationPR-437", committedDate: date},
 			},
 			endCursor:   "somecursor",
 			hasNextPage: true,
 		},
 		{
-			tags: []repoTag{
-				{tag: "_gheMigrationPR-438", commitDate: date},
-				{tag: "_gheMigrationPR-439", commitDate: date},
-				{tag: "_gheMigrationPR-430", commitDate: date},
+			tags: []tagResponse{
+				{tag: "_gheMigrationPR-438", committedDate: date},
+				{tag: "_gheMigrationPR-439", committedDate: date},
+				{tag: "_gheMigrationPR-430", committedDate: date},
 			},
 		},
 	}
@@ -156,12 +157,12 @@ func TestTagsForRepos_MultiplePages(t *testing.T) {
 
 	wantTags := map[string][]*repoTag{
 		"corp/repo1": {
-			{tag: "_gheMigrationPR-435", commitDate: date},
-			{tag: "_gheMigrationPR-436", commitDate: date},
-			{tag: "_gheMigrationPR-437", commitDate: date},
-			{tag: "_gheMigrationPR-438", commitDate: date},
-			{tag: "_gheMigrationPR-439", commitDate: date},
-			{tag: "_gheMigrationPR-430", commitDate: date},
+			{tag: "_gheMigrationPR-435", tagDate: date},
+			{tag: "_gheMigrationPR-436", tagDate: date},
+			{tag: "_gheMigrationPR-437", tagDate: date},
+			{tag: "_gheMigrationPR-438", tagDate: date},
+			{tag: "_gheMigrationPR-439", tagDate: date},
+			{tag: "_gheMigrationPR-430", tagDate: date},
 		},
 	}
 
@@ -175,7 +176,49 @@ func TestTagsForRepos_MultiplePages(t *testing.T) {
 	}
 
 	if !cmp.Equal(wantTags, index.repoTags, cmp.AllowUnexported(repoTag{})) {
-		t.Errorf("wanted tags: %v, got: %v", wantTags, index.repoTags)
+		t.Errorf("unexpected tags: -want, +got: %s", cmp.Diff(wantTags, index.repoTags, cmpopts.EquateComparable(repoTag{})))
+	}
+}
+
+func TestTagsForRepos_HandlesCommitsAndAnnotatedTags(t *testing.T) {
+	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+
+	responses := []struct {
+		tags []tagResponse
+	}{
+		{
+			tags: []tagResponse{
+				{tag: "_gheMigrationPR-435", committedDate: date},
+				{tag: "_gheMigrationPR-436", taggerDate: date},
+				{tag: "_gheMigrationPR-437", taggerDate: date},
+			},
+		},
+	}
+
+	var stubbedResponses []any
+	for _, response := range responses {
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, "", false))
+	}
+
+	wantTags := map[string][]*repoTag{
+		"corp/repo1": {
+			{tag: "_gheMigrationPR-435", tagDate: date},
+			{tag: "_gheMigrationPR-436", tagDate: date},
+			{tag: "_gheMigrationPR-437", tagDate: date},
+		},
+	}
+
+	repos := make(chan string, 1)
+	repos <- "corp/repo1"
+	close(repos)
+
+	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
+	if err := index.tagsForRepos(t.Context(), repos); err != nil {
+		t.Fatal(err)
+	}
+
+	if !cmp.Equal(wantTags, index.repoTags, cmp.AllowUnexported(repoTag{})) {
+		t.Errorf("unexpected tags: -want, +got: %s", cmp.Diff(wantTags, index.repoTags, cmpopts.EquateComparable(repoTag{})))
 	}
 }
 
@@ -202,13 +245,24 @@ func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.S
 	return q
 }
 
-func buildTagQueryResponse(tags []repoTag, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
+type tagResponse struct {
+	tag           string
+	committedDate time.Time
+	taggerDate    time.Time
+}
+
+func buildTagQueryResponse(tags []tagResponse, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
 	var edges []tagQueryEdge
 
 	for _, tag := range tags {
 		var edge tagQueryEdge
 		edge.Node.Name = githubv4.String(tag.tag)
-		edge.Node.Target.Commit.CommittedDate = *githubv4.NewDateTime(githubv4.DateTime{Time: tag.commitDate})
+		if !tag.committedDate.IsZero() {
+			edge.Node.Target.Commit.CommittedDate = *githubv4.NewDateTime(githubv4.DateTime{Time: tag.committedDate})
+		}
+		if !tag.taggerDate.IsZero() {
+			edge.Node.Target.Tag.Tagger.Date = *githubv4.NewDateTime(githubv4.DateTime{Time: tag.taggerDate})
+		}
 		edges = append(edges, edge)
 	}
 

@@ -13,9 +13,9 @@ import (
 func TestIndexHandler(t *testing.T) {
 	fakedRepos := map[string][]*repoTag{
 		"repo1": []*repoTag{
-			{tag: "tag1", commitDate: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
-			{tag: "tag2", commitDate: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
-			{tag: "tag3", commitDate: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
+			{tag: "tag1", tagDate: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
+			{tag: "tag2", tagDate: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
+			{tag: "tag3", tagDate: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
 		},
 	}
 
