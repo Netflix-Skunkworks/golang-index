@@ -191,6 +191,12 @@ func (i *index) tagsForRepo(ctx context.Context, repoName string) ([]*repoTag, e
 		for _, t := range q.Repository.Refs.Edges {
 			var tag repoTag
 			tag.tag = string(t.Node.Name)
+
+			// leightweight tags point directly to commits and have
+			// `committedDate` timestamp stored on them directly. annotated
+			// tags do not have a committedDate and instead store their
+			// creation timestamp in the `tag.tagger.date` field. This logic is
+			// needed so we correctly set tag date for both type of tags.
 			if !t.Node.Target.Commit.CommittedDate.IsZero() {
 				tag.tagDate = t.Node.Target.Commit.CommittedDate.Time
 			} else if !t.Node.Target.Tag.Tagger.Date.IsZero() {
