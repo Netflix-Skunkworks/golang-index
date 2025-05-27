@@ -60,7 +60,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 repoTags:
 	for repoName, tags := range s.idx.repoTags {
 		for _, tag := range tags {
-			if tag.commitDate.Before(since) {
+			if tag.tagDate.Before(since) {
 				continue
 			}
 
@@ -72,7 +72,7 @@ repoTags:
 			out, err := json.Marshal(&module{
 				Path:      fmt.Sprintf("github.netflix.net/%s", repoName),
 				Version:   tag.tag,
-				Timestamp: tag.commitDate.Format(time.RFC3339),
+				Timestamp: tag.tagDate.Format(time.RFC3339),
 			})
 			if err != nil {
 				http.Error(w, fmt.Sprintf("error marshalling response for tag %s: %v", tag.tag, err), http.StatusInternalServerError)
