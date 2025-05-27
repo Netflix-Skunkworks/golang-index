@@ -7,10 +7,9 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    types: [opened, edited, synchronize, reopened]
 
 jobs:
-
   build:
     runs-on: ubuntu-latest
     steps:
