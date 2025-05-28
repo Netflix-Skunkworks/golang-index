@@ -24,8 +24,8 @@ CREATE TABLE repos (
     -- Workers should re-index a repo's tag when:
     --     NOW > indexing_finished + re-index-period, and
     --     NOW > indexing_began + indexing-ttl
-    indexing_began TIMESTAMP,
-    indexing_finished TIMESTAMP
+    indexing_began TIMESTAMP DEFAULT TIMESTAMP '-infinity',
+    indexing_finished TIMESTAMP DEFAULT TIMESTAMP '-infinity'
 );
 
 -- A listing of all tags for all repos.
