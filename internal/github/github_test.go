@@ -1,4 +1,4 @@
-package main
+package github
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/shurcooL/githubv4"
 )
 
@@ -39,20 +38,19 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 	return nil
 }
 
-func TestRepos_EmptyResponse(t *testing.T) {
-	index := newIndex(&mockGithubClient{})
+func TestGoRepos_EmptyResponse(t *testing.T) {
+	sut := NewGithubSCM(&mockGithubClient{})
 	resultsChan := make(chan string)
-
-	if err := index.repos(t.Context(), resultsChan); err != nil {
+	got, err := sut.GoRepos(t.Context())
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	if len(resultsChan) != 0 {
+	if len(got) != 0 {
 		t.Errorf("expected channel to be empty but it has %d results", len(resultsChan))
 	}
 }
 
-func TestRepos_MultiplePages(t *testing.T) {
+func TestGoRepos_MultiplePages(t *testing.T) {
 	responses := []struct {
 		reposURLs   []string
 		endCursor   githubv4.String
@@ -82,16 +80,11 @@ func TestRepos_MultiplePages(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, response)
 	}
 
-	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
-	resultsChan := make(chan string, 100)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses})
 
-	if err := index.repos(t.Context(), resultsChan); err != nil {
+	gotResults, err := sut.GoRepos(t.Context())
+	if err != nil {
 		t.Fatal(err)
-	}
-
-	var results []string
-	for r := range resultsChan {
-		results = append(results, r)
 	}
 
 	wantResults := []string{
@@ -103,29 +96,23 @@ func TestRepos_MultiplePages(t *testing.T) {
 		"corp/cpie-proxyd",
 	}
 
-	if diff := cmp.Diff(wantResults, results); diff != "" {
+	if diff := cmp.Diff(wantResults, gotResults); diff != "" {
 		t.Errorf("unexpected results from repos: -want +got: %s", diff)
 	}
 }
 
-func TestTagsForRepos_EmptyResponse(t *testing.T) {
-	repos := make(chan string, 1)
-	repos <- "corp/repo1"
-	close(repos)
-
-	index := newIndex(&mockGithubClient{})
-	if err := index.tagsForRepos(t.Context(), repos); err != nil {
+func TestTagsForRepo_EmptyResponse(t *testing.T) {
+	sut := NewGithubSCM(&mockGithubClient{})
+	got, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	gotTags := index.repoTags["corp/repo1"]
-
-	if len(gotTags) != 0 {
-		t.Errorf("expected no tags, but got %d results", len(gotTags))
+	if len(got) != 0 {
+		t.Errorf("expected no tags, but got %d results", len(got))
 	}
 }
 
-func TestTagsForRepos_MultiplePages(t *testing.T) {
+func TestTagsForRepo_MultiplePages(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
 	responses := []struct {
 		tags        []tagResponse
@@ -155,32 +142,27 @@ func TestTagsForRepos_MultiplePages(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, response.endCursor, response.hasNextPage))
 	}
 
-	wantTags := map[string][]*repoTag{
-		"corp/repo1": {
-			{tag: "_gheMigrationPR-435", tagDate: date},
-			{tag: "_gheMigrationPR-436", tagDate: date},
-			{tag: "_gheMigrationPR-437", tagDate: date},
-			{tag: "_gheMigrationPR-438", tagDate: date},
-			{tag: "_gheMigrationPR-439", tagDate: date},
-			{tag: "_gheMigrationPR-430", tagDate: date},
-		},
+	wantTags := []*RepoTag{
+		{Tag: "_gheMigrationPR-435", TagDate: date},
+		{Tag: "_gheMigrationPR-436", TagDate: date},
+		{Tag: "_gheMigrationPR-437", TagDate: date},
+		{Tag: "_gheMigrationPR-438", TagDate: date},
+		{Tag: "_gheMigrationPR-439", TagDate: date},
+		{Tag: "_gheMigrationPR-430", TagDate: date},
 	}
 
-	repos := make(chan string, 1)
-	repos <- "corp/repo1"
-	close(repos)
-
-	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
-	if err := index.tagsForRepos(t.Context(), repos); err != nil {
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses})
+	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !cmp.Equal(wantTags, index.repoTags, cmp.AllowUnexported(repoTag{})) {
-		t.Errorf("unexpected tags: -want, +got: %s", cmp.Diff(wantTags, index.repoTags, cmpopts.EquateComparable(repoTag{})))
+	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
+		t.Errorf("unexpected tags: -want, +got: %s", diff)
 	}
 }
 
-func TestTagsForRepos_HandlesCommitsAndAnnotatedTags(t *testing.T) {
+func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
 
 	responses := []struct {
@@ -200,25 +182,20 @@ func TestTagsForRepos_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, "", false))
 	}
 
-	wantTags := map[string][]*repoTag{
-		"corp/repo1": {
-			{tag: "_gheMigrationPR-435", tagDate: date},
-			{tag: "_gheMigrationPR-436", tagDate: date},
-			{tag: "_gheMigrationPR-437", tagDate: date},
-		},
+	wantTags := []*RepoTag{
+		{Tag: "_gheMigrationPR-435", TagDate: date},
+		{Tag: "_gheMigrationPR-436", TagDate: date},
+		{Tag: "_gheMigrationPR-437", TagDate: date},
 	}
 
-	repos := make(chan string, 1)
-	repos <- "corp/repo1"
-	close(repos)
-
-	index := newIndex(&mockGithubClient{stubbedResults: stubbedResponses})
-	if err := index.tagsForRepos(t.Context(), repos); err != nil {
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses})
+	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !cmp.Equal(wantTags, index.repoTags, cmp.AllowUnexported(repoTag{})) {
-		t.Errorf("unexpected tags: -want, +got: %s", cmp.Diff(wantTags, index.repoTags, cmpopts.EquateComparable(repoTag{})))
+	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
+		t.Errorf("unexpected tags: -want, +got: %s", diff)
 	}
 }
 

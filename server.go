@@ -1,26 +1,31 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/Netflix-Skunkworks/golang-index/internal/db"
 )
 
-const defaultNumberOfOutputs = 2000
+const defaultNumberOfOutputs = int64(2000)
+
+// Exists to allow tests to mock the db.
+type idb interface {
+	FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([]*db.RepoTag, error)
+}
 
 type server struct {
 	port int
-
-	mu  sync.RWMutex
-	idx *index
+	idb  idb
 }
 
-func newServer(port int, index *index) *server {
-	return &server{port: port, idx: index}
+func newServer(port int, idb idb) *server {
+	return &server{port: port, idb: idb}
 }
 
 type module struct {
@@ -30,12 +35,6 @@ type module struct {
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	s.idx.mu.RLock()
-	defer s.idx.mu.RUnlock()
-
 	var since time.Time
 	var err error
 	if sinceParam := r.URL.Query().Get("since"); sinceParam != "" {
@@ -48,52 +47,38 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	limit := defaultNumberOfOutputs
 	if limitParam := r.URL.Query().Get("limit"); limitParam != "" {
-		if limit, err = strconv.Atoi(limitParam); err != nil {
+		if limit, err = strconv.ParseInt(limitParam, 10, 64); err != nil {
 			http.Error(w, fmt.Sprintf("error converting 'limit' param %s: %v", limitParam, err), http.StatusBadRequest)
 			return
 		}
 	}
 
-	var count int
+	repoTags, err := s.idb.FetchRepoTags(r.Context(), since, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("error fetching repo tags: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	var lines []string
-
-repoTags:
-	for repoName, tags := range s.idx.repoTags {
-		for _, tag := range tags {
-			if tag.tagDate.Before(since) {
-				continue
-			}
-
-			count += 1
-			if count > limit {
-				break repoTags
-			}
-
-			out, err := json.Marshal(&module{
-				Path:      fmt.Sprintf("github.netflix.net/%s", repoName),
-				Version:   tag.tag,
-				Timestamp: tag.tagDate.Format(time.RFC3339),
-			})
-			if err != nil {
-				http.Error(w, fmt.Sprintf("error marshalling response for tag %s: %v", tag.tag, err), http.StatusInternalServerError)
-				return
-			}
-
-			lines = append(lines, string(out))
+	for _, rt := range repoTags {
+		out, err := json.Marshal(&module{
+			// TODO(issues/22): Make this not Netflix specific.
+			Path:      fmt.Sprintf("github.netflix.net/%s", rt.OrgRepoName),
+			Version:   rt.TagName,
+			Timestamp: rt.Created.Format(time.RFC3339),
+		})
+		if err != nil {
+			http.Error(w, fmt.Sprintf("error marshalling response for %v: %v", rt, err), http.StatusInternalServerError)
+			return
 		}
+
+		lines = append(lines, string(out))
 	}
 
 	if _, err := fmt.Fprint(w, strings.Join(lines, "\n")); err != nil {
 		http.Error(w, fmt.Sprintf("error writing response: %v", err), http.StatusInternalServerError)
 		return
 	}
-}
-
-func (s *server) updateIndex(newIndex *index) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.idx = newIndex
 }
 
 func (s *server) listenAndServe() error {
