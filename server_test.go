@@ -1,29 +1,37 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/Netflix-Skunkworks/golang-index/internal/db"
 	"github.com/google/go-cmp/cmp"
 )
 
-func TestIndexHandler(t *testing.T) {
-	fakedRepos := map[string][]*repoTag{
-		"repo1": []*repoTag{
-			{tag: "tag1", tagDate: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
-			{tag: "tag2", tagDate: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
-			{tag: "tag3", tagDate: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
-		},
+type fakeDB struct {
+	repoTagsToReturn []*db.RepoTag
+}
+
+func (fake *fakeDB) FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([]*db.RepoTag, error) {
+	return fake.repoTagsToReturn, nil
+}
+
+func TestHandleIndex(t *testing.T) {
+	fakeTags := []*db.RepoTag{
+		{OrgRepoName: "repo1", TagName: "tag1", Created: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
+		{OrgRepoName: "repo1", TagName: "tag2", Created: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
+		{OrgRepoName: "repo1", TagName: "tag3", Created: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
 	}
 
 	for _, tc := range []struct {
 		name           string
 		sinceParam     string
 		limitParam     string
-		tags           map[string][]*repoTag
+		tags           []*db.RepoTag
 		wantStatusCode int
 		wantResponse   string
 	}{
@@ -33,7 +41,7 @@ func TestIndexHandler(t *testing.T) {
 		},
 		{
 			name:           "response with tags",
-			tags:           fakedRepos,
+			tags:           fakeTags,
 			wantStatusCode: http.StatusOK,
 			wantResponse: "" +
 				`{"Path":"github.netflix.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}` + "\n" +
@@ -41,44 +49,20 @@ func TestIndexHandler(t *testing.T) {
 				`{"Path":"github.netflix.net/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
 		},
 		{
-			name:           "with 'since' query param",
-			sinceParam:     "2025-02-01T00:00:00Z",
-			tags:           fakedRepos,
-			wantStatusCode: http.StatusOK,
-			wantResponse: "" +
-				`{"Path":"github.netflix.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}` + "\n" +
-				`{"Path":"github.netflix.net/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
-		},
-		{
-			name:           "with invalid 'since' query param",
+			name:           "with invalid since query param",
 			sinceParam:     "invalid",
-			tags:           fakedRepos,
+			tags:           fakeTags,
 			wantStatusCode: http.StatusBadRequest,
 		},
 		{
-			name:           "with 'limit' query param",
-			limitParam:     "1",
-			tags:           fakedRepos,
-			wantStatusCode: http.StatusOK,
-			wantResponse:   `{"Path":"github.netflix.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}`,
-		},
-		{
-			name:           "with invalid 'limit' query param",
+			name:           "with invalid limit query param",
 			limitParam:     "invalid",
-			tags:           fakedRepos,
+			tags:           fakeTags,
 			wantStatusCode: http.StatusBadRequest,
-		},
-		{
-			name:           "with both 'limit' and 'since' query params",
-			sinceParam:     "2025-02-01T00:00:00Z",
-			limitParam:     "1",
-			tags:           fakedRepos,
-			wantStatusCode: http.StatusOK,
-			wantResponse:   `{"Path":"github.netflix.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newServer(0, &index{repoTags: tc.tags})
+			s := newServer(0, &fakeDB{repoTagsToReturn: tc.tags})
 
 			request := httptest.NewRequest(http.MethodGet, "/", nil)
 			query := request.URL.Query()
