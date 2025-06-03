@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Netflix-Skunkworks/golang-index/internal/db"
+	"golang.org/x/exp/slog"
 )
 
 const defaultNumberOfOutputs = int64(2000)
@@ -84,6 +85,6 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listenAndServe() error {
 	http.HandleFunc("/", s.handleIndex)
-	fmt.Printf("Server listening on :%d\n", s.port)
+	slog.Info(fmt.Sprintf("Server listening on :%d\n", s.port))
 	return http.ListenAndServe(fmt.Sprintf(":%d", s.port), nil)
 }
