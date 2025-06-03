@@ -62,7 +62,7 @@ func TestHandleIndex(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newServer(0, &fakeDB{repoTagsToReturn: tc.tags})
+			s := newServer(0, &fakeDB{repoTagsToReturn: tc.tags}, "github.netflix.net")
 
 			request := httptest.NewRequest(http.MethodGet, "/", nil)
 			query := request.URL.Query()
