@@ -11,6 +11,8 @@ import (
 	"github.com/shurcooL/githubv4"
 )
 
+const testGithubHostname = "github.somecompany.net"
+
 type mockGithubClient struct {
 	// index pointer for the stubResults slice
 	resultsIdx int
@@ -39,7 +41,7 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 }
 
 func TestGoRepos_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{})
+	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname)
 	resultsChan := make(chan string)
 	got, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -58,18 +60,18 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}{
 		{
 			reposURLs: []string{
-				"https://github.netflix.net/corp/ftl-proxy",
-				"https://github.netflix.net/corp/cloudgaming-ocgactl",
-				"https://github.netflix.net/corp/cloudgaming-moby-fork",
+				"https://github.somecompany.net/corp/ftl-proxy",
+				"https://github.somecompany.net/corp/cloudgaming-ocgactl",
+				"https://github.somecompany.net/corp/cloudgaming-moby-fork",
 			},
 			hasNextPage: true,
 			endCursor:   "somecursor",
 		},
 		{
 			reposURLs: []string{
-				"https://github.netflix.net/corp/cloudgaming-tdd-grafana",
-				"https://github.netflix.net/corp/cloudgaming-game-input-go",
-				"https://github.netflix.net/corp/cpie-proxyd",
+				"https://github.somecompany.net/corp/cloudgaming-tdd-grafana",
+				"https://github.somecompany.net/corp/cloudgaming-game-input-go",
+				"https://github.somecompany.net/corp/cpie-proxyd",
 			},
 		},
 	}
@@ -80,7 +82,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, response)
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses})
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
 
 	gotResults, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -102,7 +104,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 }
 
 func TestTagsForRepo_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{})
+	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname)
 	got, err := sut.TagsForRepo(t.Context(), "corp/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +153,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		{Tag: "_gheMigrationPR-430", TagDate: date},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses})
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
 	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +190,7 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 		{Tag: "_gheMigrationPR-437", TagDate: date},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses})
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "")
 	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
 	if err != nil {
 		t.Fatal(err)

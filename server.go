@@ -20,12 +20,13 @@ type idb interface {
 }
 
 type server struct {
-	port int
-	idb  idb
+	port           int
+	idb            idb
+	githubHostName string
 }
 
-func newServer(port int, idb idb) *server {
-	return &server{port: port, idb: idb}
+func newServer(port int, idb idb, githubHostName string) *server {
+	return &server{port: port, idb: idb, githubHostName: githubHostName}
 }
 
 type module struct {
@@ -62,8 +63,8 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var lines []string
 	for _, rt := range repoTags {
 		out, err := json.Marshal(&module{
-			// TODO(issues/22): Make this not Netflix specific.
-			Path:      fmt.Sprintf("github.netflix.net/%s", rt.OrgRepoName),
+			// TODO(issues/4): We shouldn't assume Go module path always matches VCS path.
+			Path:      fmt.Sprintf("%s/%s", s.githubHostName, rt.OrgRepoName),
 			Version:   rt.TagName,
 			Timestamp: rt.Created.Format(time.RFC3339),
 		})

@@ -44,9 +44,9 @@ func TestHandleIndex(t *testing.T) {
 			tags:           fakeTags,
 			wantStatusCode: http.StatusOK,
 			wantResponse: "" +
-				`{"Path":"github.netflix.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}` + "\n" +
-				`{"Path":"github.netflix.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}` + "\n" +
-				`{"Path":"github.netflix.net/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
+				`{"Path":"github.somecompany.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}` + "\n" +
+				`{"Path":"github.somecompany.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}` + "\n" +
+				`{"Path":"github.somecompany.net/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
 		},
 		{
 			name:           "with invalid since query param",
@@ -62,7 +62,7 @@ func TestHandleIndex(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newServer(0, &fakeDB{repoTagsToReturn: tc.tags})
+			s := newServer(0, &fakeDB{repoTagsToReturn: tc.tags}, "github.somecompany.net")
 
 			request := httptest.NewRequest(http.MethodGet, "/", nil)
 			query := request.URL.Query()

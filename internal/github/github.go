@@ -19,12 +19,13 @@ type githubClient interface {
 
 // A handle for specialised github querying.
 type GithubSCM struct {
-	graphqlClient githubClient
+	graphqlClient  githubClient
+	githubHostName string
 }
 
 // Creates a new Github SCM.
-func NewGithubSCM(client githubClient) *GithubSCM {
-	return &GithubSCM{graphqlClient: client}
+func NewGithubSCM(client githubClient, githubHostName string) *GithubSCM {
+	return &GithubSCM{graphqlClient: client, githubHostName: githubHostName}
 }
 
 type repoQueryResult struct {
@@ -65,8 +66,7 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 		}
 
 		for _, edge := range q.Search.Edges {
-			// TODO(issues/22): Make this not Netflix specific.
-			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.String()), "https://github.netflix.net/")
+			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.String()), fmt.Sprintf("https://%s/", scm.githubHostName))
 			results = append(results, string(corpName))
 		}
 
