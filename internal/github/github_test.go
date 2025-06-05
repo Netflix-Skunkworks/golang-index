@@ -11,7 +11,7 @@ import (
 	"github.com/shurcooL/githubv4"
 )
 
-const testGithubHostname = "github.netflix.net"
+const testGithubHostname = "github.somecompany.net"
 
 type mockGithubClient struct {
 	// index pointer for the stubResults slice
@@ -60,18 +60,18 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}{
 		{
 			reposURLs: []string{
-				"https://github.netflix.net/corp/ftl-proxy",
-				"https://github.netflix.net/corp/cloudgaming-ocgactl",
-				"https://github.netflix.net/corp/cloudgaming-moby-fork",
+				"https://github.somecompany.net/corp/ftl-proxy",
+				"https://github.somecompany.net/corp/cloudgaming-ocgactl",
+				"https://github.somecompany.net/corp/cloudgaming-moby-fork",
 			},
 			hasNextPage: true,
 			endCursor:   "somecursor",
 		},
 		{
 			reposURLs: []string{
-				"https://github.netflix.net/corp/cloudgaming-tdd-grafana",
-				"https://github.netflix.net/corp/cloudgaming-game-input-go",
-				"https://github.netflix.net/corp/cpie-proxyd",
+				"https://github.somecompany.net/corp/cloudgaming-tdd-grafana",
+				"https://github.somecompany.net/corp/cloudgaming-game-input-go",
+				"https://github.somecompany.net/corp/cpie-proxyd",
 			},
 		},
 	}
