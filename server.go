@@ -63,7 +63,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var lines []string
 	for _, rt := range repoTags {
 		out, err := json.Marshal(&module{
-			// TODO(issues/4): We shouldn't assume module path always matches vcs path
+			// TODO(issues/4): We shouldn't assume Go module path always matches VCS path.
 			Path:      fmt.Sprintf("%s/%s", s.githubHostName, rt.OrgRepoName),
 			Version:   rt.TagName,
 			Timestamp: rt.Created.Format(time.RFC3339),
