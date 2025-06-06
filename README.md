@@ -27,7 +27,7 @@ docker run \
 # Stand up postgres.
 go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 migrate -source file://migrations -database "postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB?sslmode=disable" up
-time go run . -githubHostName=<...> -githubAuthToken=<...>
+go run . -githubHostName=... -githubAuthToken=...
 ```
 
 ## Running tests
