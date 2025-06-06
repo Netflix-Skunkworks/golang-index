@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"os"
 	"strconv"
@@ -33,7 +34,7 @@ func main() {
 	flag.Parse()
 
 	if *githubHostName == "" || *githubAuthToken == "" {
-		fmt.Println("--githubHostName (no http/https: github.mycompany.net) and --githubAuthToken are required")
+		slog.Info("--githubHostName (no http/https: github.mycompany.net) and --githubAuthToken are required")
 		os.Exit(1)
 	}
 
@@ -41,12 +42,12 @@ func main() {
 
 	pgUsername, pgPassword, pgHost, pgPort, pgDbname, err := postgresDetails()
 	if err != nil {
-		fmt.Println(err)
+		slog.Error(err.Error())
 		os.Exit(1)
 	}
 	idb, err := db.NewDB(pgUsername, pgPassword, pgHost, pgPort, pgDbname)
 	if err != nil {
-		fmt.Println(err)
+		slog.Error(err.Error())
 		os.Exit(1)
 	}
 
@@ -69,7 +70,7 @@ func main() {
 				return fmt.Errorf("error fetching next reindex all repos work: %v", err)
 			}
 			if shouldReindex {
-				fmt.Println("should re-index all Go repos: yes")
+				slog.Info("should re-index all Go repos: yes")
 				allRepos, err := githubSCM.GoRepos(grpCtx)
 				if err != nil {
 					// TODO(issues/21): Handle 429 Too Many requests by performing exponential backoff.
@@ -78,9 +79,9 @@ func main() {
 				if err := idb.StoreRepos(ctx, allRepos); err != nil {
 					return fmt.Errorf("error storing all repos: %v", err)
 				}
-				fmt.Printf("finished re-indexing all Go repos. saw %d repos\n", len(allRepos))
+				slog.Info(fmt.Sprintf("finished re-indexing all Go repos. saw %d repos", len(allRepos)))
 			} else {
-				fmt.Printf("should re-index all Go repos: no. waiting %v to check again\n", *allReposReindexWorkCheckPeriod)
+				slog.Info(fmt.Sprintf("should re-index all Go repos: no. waiting %v to check again", *allReposReindexWorkCheckPeriod))
 			}
 
 			// No point in eagerly checking for new work: there's only one work
@@ -96,6 +97,7 @@ func main() {
 		// TODO(jbarkhuysen): This should probably be in a function that's tested.
 		grp.Go(func() error {
 			// Periodically re-index a repo's tags.
+			logger := slog.With("workerID", workerID)
 			for {
 				repoToReindex, gotWork, err := idb.NextReindexRepoTagsWork(grpCtx, *repoTagsReindexTTL, *repoTagsReindexPeriod)
 				if err != nil {
@@ -105,7 +107,7 @@ func main() {
 					// Wait with (1s-60s) jitter and check again.
 					jitter := time.Duration((rand.Intn(60) + 1) * 1e9)
 					waitTime := *repoTagsReindexingWorkCheckPeriod + jitter
-					fmt.Printf("repo tags re-indexing worker %d: no work, waiting %v to check again\n", workerID, waitTime)
+					logger.Info(fmt.Sprintf("repo tags re-indexing: no work, waiting %v to check again", waitTime))
 					select {
 					case <-time.After(waitTime):
 					case <-grpCtx.Done():
@@ -113,7 +115,7 @@ func main() {
 					}
 					continue
 				}
-				fmt.Printf("repo tags re-indexing worker %d: got work for repo %s\n", workerID, repoToReindex)
+				logger.Info(fmt.Sprintf("repo tags re-indexing: got work for repo %s", repoToReindex))
 				repoTags, err := githubSCM.TagsForRepo(grpCtx, repoToReindex)
 				if err != nil {
 					// TODO(issues/21): Handle 429 Too Many requests by performing exponential backoff.
@@ -126,11 +128,11 @@ func main() {
 				for _, rt := range repoTags {
 					dbRepoTags = append(dbRepoTags, &db.RepoTag{OrgRepoName: repoToReindex, TagName: rt.Tag, Created: rt.TagDate})
 				}
-				fmt.Printf("repo tags re-indexing worker %d: finished re-indexing repo %s, got %d tags... storing results\n", workerID, repoToReindex, len(repoTags))
+				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d tags... storing results", repoToReindex, len(repoTags)))
 				if err := idb.StoreRepoTags(grpCtx, dbRepoTags); err != nil {
 					return fmt.Errorf("error storing repo tags: %v", err)
 				}
-				fmt.Printf("repo tags re-indexing worker %d: finished re-indexing repo %s, got %d tags... done\n", workerID, repoToReindex, len(repoTags))
+				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d tags... done", repoToReindex, len(repoTags)))
 
 				// Eagerly check for new work rather than waiting again.
 			}
@@ -144,10 +146,10 @@ func main() {
 	}()
 
 	if err := grp.Wait(); err != nil {
-		fmt.Println(err)
+		slog.Error(err.Error())
 		os.Exit(1)
 	}
-	fmt.Println("shutting down gracefully")
+	slog.Info("shutting down gracefully")
 }
 
 func postgresDetails() (username string, password string, host string, port uint16, dbname string, _ error) {
