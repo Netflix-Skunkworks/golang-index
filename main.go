@@ -126,7 +126,7 @@ func main() {
 				}
 				var dbRepoTags []*db.RepoTag
 				for _, rt := range repoTags {
-					dbRepoTags = append(dbRepoTags, &db.RepoTag{OrgRepoName: repoToReindex, TagName: rt.Tag, Created: rt.TagDate})
+					dbRepoTags = append(dbRepoTags, &db.RepoTag{OrgRepoName: repoToReindex, TagName: rt.Tag, ModulePath: rt.ModulePath, Created: rt.TagDate})
 				}
 				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d tags... storing results", repoToReindex, len(repoTags)))
 				if err := idb.StoreRepoTags(grpCtx, dbRepoTags); err != nil {

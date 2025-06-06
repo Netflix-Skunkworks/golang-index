@@ -123,7 +123,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date},
+				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.corp.company.com/corp/repo1\n"},
 				{tag: "_gheMigrationPR-436", committedDate: date},
 				{tag: "_gheMigrationPR-437", committedDate: date},
 			},
@@ -133,7 +133,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		{
 			tags: []tagResponse{
 				{tag: "_gheMigrationPR-438", committedDate: date},
-				{tag: "_gheMigrationPR-439", committedDate: date},
+				{tag: "_gheMigrationPR-439", committedDate: date, goModContent: "module stash.corp.company.com/corp/repo1\n"},
 				{tag: "_gheMigrationPR-430", committedDate: date},
 			},
 		},
@@ -141,16 +141,19 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, response.endCursor, response.hasNextPage))
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(t, response.tags, response.endCursor, response.hasNextPage))
+		for _, tag := range response.tags {
+			stubbedResponses = append(stubbedResponses, buildGoModQueryResult(t, tag.goModContent))
+		}
 	}
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date},
-		{Tag: "_gheMigrationPR-436", TagDate: date},
-		{Tag: "_gheMigrationPR-437", TagDate: date},
-		{Tag: "_gheMigrationPR-438", TagDate: date},
-		{Tag: "_gheMigrationPR-439", TagDate: date},
-		{Tag: "_gheMigrationPR-430", TagDate: date},
+		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.corp.company.com/corp/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
+		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
+		{Tag: "_gheMigrationPR-439", TagDate: date, ModulePath: "stash.corp.company.com/corp/repo1"},
+		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
 	}
 
 	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
@@ -172,7 +175,7 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date},
+				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.corp.company.com/corp/repo1\n"},
 				{tag: "_gheMigrationPR-436", taggerDate: date},
 				{tag: "_gheMigrationPR-437", taggerDate: date},
 			},
@@ -181,16 +184,19 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, "", false))
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(t, response.tags, "", false))
+		for _, tag := range response.tags {
+			stubbedResponses = append(stubbedResponses, buildGoModQueryResult(t, tag.goModContent))
+		}
 	}
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date},
-		{Tag: "_gheMigrationPR-436", TagDate: date},
-		{Tag: "_gheMigrationPR-437", TagDate: date},
+		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.corp.company.com/corp/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "")
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
 	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -226,11 +232,14 @@ func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.S
 
 type tagResponse struct {
 	tag           string
+	goModContent  string
 	committedDate time.Time
 	taggerDate    time.Time
 }
 
-func buildTagQueryResponse(tags []tagResponse, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
+func buildTagQueryResponse(t *testing.T, tags []tagResponse, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
+	t.Helper()
+
 	var edges []tagQueryEdge
 
 	for _, tag := range tags {
@@ -249,5 +258,15 @@ func buildTagQueryResponse(tags []tagResponse, endCursor githubv4.String, hasNex
 	q.Repository.Refs.Edges = edges
 	q.Repository.Refs.PageInfo.EndCursor = endCursor
 	q.Repository.Refs.PageInfo.HasNextPage = hasNextPage
+	return q
+}
+
+func buildGoModQueryResult(t *testing.T, rootGoModContents string) goModQueryResult {
+	t.Helper()
+
+	var q goModQueryResult
+	if rootGoModContents != "" {
+		q.Repository.RootGoMod.Blob.Text = rootGoModContents
+	}
 	return q
 }

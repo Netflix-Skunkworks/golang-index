@@ -22,9 +22,9 @@ func (fake *fakeDB) FetchRepoTags(ctx context.Context, since time.Time, limit in
 
 func TestHandleIndex(t *testing.T) {
 	fakeTags := []*db.RepoTag{
-		{OrgRepoName: "repo1", TagName: "tag1", Created: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
-		{OrgRepoName: "repo1", TagName: "tag2", Created: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
-		{OrgRepoName: "repo1", TagName: "tag3", Created: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
+		{OrgRepoName: "corp/repo1", TagName: "tag1", ModulePath: "github.somecompany.net/corp/repo1", Created: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
+		{OrgRepoName: "corp/repo1", TagName: "tag2", ModulePath: "github.somecompany.net/corp/repo1", Created: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
+		{OrgRepoName: "corp/repo1", TagName: "tag3", ModulePath: "stash.somecompany.net/corp/repo1", Created: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
 	}
 
 	for _, tc := range []struct {
@@ -44,9 +44,9 @@ func TestHandleIndex(t *testing.T) {
 			tags:           fakeTags,
 			wantStatusCode: http.StatusOK,
 			wantResponse: "" +
-				`{"Path":"github.somecompany.net/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}` + "\n" +
-				`{"Path":"github.somecompany.net/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}` + "\n" +
-				`{"Path":"github.somecompany.net/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
+				`{"Path":"github.somecompany.net/corp/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}` + "\n" +
+				`{"Path":"github.somecompany.net/corp/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}` + "\n" +
+				`{"Path":"stash.somecompany.net/corp/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
 		},
 		{
 			name:           "with invalid since query param",

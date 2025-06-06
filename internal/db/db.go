@@ -42,13 +42,14 @@ func NewDB(username, password, host string, port uint16, dbname string) (*DB, er
 type RepoTag struct {
 	OrgRepoName string
 	TagName     string
+	ModulePath  string
 	Created     time.Time
 }
 
 // Fetches repo tags.
 func (d *DB) FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([]*RepoTag, error) {
 	query := `
-SELECT org_repo_name, tag_name, created
+SELECT org_repo_name, tag_name, module_path, created
 FROM repo_tags
 WHERE created >= $1
 ORDER BY created DESC
@@ -62,7 +63,7 @@ LIMIT $2;`
 	var repoTags []*RepoTag
 	for rows.Next() {
 		var rt RepoTag
-		if err := rows.Scan(&rt.OrgRepoName, &rt.TagName, &rt.Created); err != nil {
+		if err := rows.Scan(&rt.OrgRepoName, &rt.TagName, &rt.ModulePath, &rt.Created); err != nil {
 			return nil, fmt.Errorf("FetchRepoTags: %v", err)
 		}
 		repoTags = append(repoTags, &rt)
@@ -168,11 +169,16 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 	var conditionalStrings []string
 	var conditionalArgs []any
 
+	// number of fields in the SQL query used to correctly number query
+	// placeholders
+	const fieldCount = 4
+
 	orgRepoNames := make(map[string]bool)
 	for i, rt := range repoTags {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d)", 3*i+1, 3*i+2, 3*i+3))
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", fieldCount*i+1, fieldCount*i+2, fieldCount*i+3, fieldCount*i+4))
 		valueArgs = append(valueArgs, rt.OrgRepoName)
 		valueArgs = append(valueArgs, rt.TagName)
+		valueArgs = append(valueArgs, rt.ModulePath)
 		valueArgs = append(valueArgs, rt.Created.Format(time.RFC3339))
 		orgRepoNames[rt.OrgRepoName] = true
 	}
@@ -200,7 +206,7 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 	}
 
 	query = fmt.Sprintf(`
-INSERT INTO repo_tags (org_repo_name, tag_name, created)
+INSERT INTO repo_tags (org_repo_name, tag_name, module_path, created)
 VALUES %s
 ON CONFLICT (org_repo_name, tag_name) DO UPDATE
 SET created = EXCLUDED.created;`, strings.Join(valueStrings, ",\n"))

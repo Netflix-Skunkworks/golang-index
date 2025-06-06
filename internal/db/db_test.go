@@ -17,9 +17,9 @@ func TestFetchRepoTags(t *testing.T) {
 
 	allTags := []*db.RepoTag{
 		// Ordered by Created DESC, which is how we expect it returned.
-		{OrgRepoName: "foo/gaz", TagName: "v0.0.1", Created: time.Now().Add(time.Minute)},
-		{OrgRepoName: "foo/bar", TagName: "v0.0.2", Created: time.Now().Add(time.Second)},
-		{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now()},
+		{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().Add(time.Minute)},
+		{OrgRepoName: "foo/bar", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(time.Second)},
+		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now()},
 	}
 	populateRepoTags(t, sqlDB, allTags)
 
@@ -84,10 +84,10 @@ func TestStoreRepoTags(t *testing.T) {
 	if err := sutDB.StoreRepos(t.Context(), []string{"foo/bar", "foo/gaz"}); err != nil {
 		t.Fatal(err)
 	}
-	preExistingTag1 := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.1", Created: time.Now().UTC()}
-	preExistingTag2 := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.2", Created: time.Now().UTC()}
-	newTag := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.3", Created: time.Now().UTC()}
-	preExistingTag3 := db.RepoTag{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().UTC()}
+	preExistingTag1 := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
+	preExistingTag2 := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
+	newTag := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.3", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
+	preExistingTag3 := db.RepoTag{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().UTC()}
 
 	populateRepoTags(t, sqlDB, []*db.RepoTag{&preExistingTag1, &preExistingTag2, &preExistingTag3})
 
@@ -181,7 +181,6 @@ func TestNextReindexAllReposWork_Basic(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestNextReindexAllReposWork_QuickSuccession(t *testing.T) {
@@ -217,7 +216,7 @@ func TestNextReindexRepoTagsWork_SingleRepo(t *testing.T) {
 	for _, tc := range reindexWorkerTestCases {
 		t.Run(tc.name, func(t *testing.T) {
 			resetTables(t, sqlDB)
-			populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)}})
+			populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
 			setSingleRepoIndexing(t, sqlDB, "foo/bar", tc.lastIndexingBegan, tc.lastIndexingFinished)
 
 			gotRepoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), tc.reindexTTL, tc.reindexPeriod)
@@ -259,7 +258,7 @@ func TestNextReindexRepoTagsWork_QuickSuccession(t *testing.T) {
 
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
-	populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)}})
+	populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
 	setSingleRepoIndexing(t, sqlDB, "foo/bar", time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
 
 	// Take work for the first time: should return true.
@@ -288,8 +287,8 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeReindexNeeded(t *testing.T) {
 	resetTables(t, sqlDB)
 
 	populateRepoTags(t, sqlDB, []*db.RepoTag{
-		{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
-		{OrgRepoName: "gaz/urk", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
+		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)},
+		{OrgRepoName: "gaz/urk", TagName: "v0.0.1", ModulePath: "github.somecompany.net/gaz/urk", Created: time.Now().Add(-1000 * time.Hour)},
 	})
 
 	// Does not need re-indexing (based on reindex period specified a bit below).

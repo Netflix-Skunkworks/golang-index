@@ -4,10 +4,12 @@ package github
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/shurcooL/githubv4"
+	"golang.org/x/mod/modfile"
 )
 
 // githubClient wraps query interface from the shurcooL/githubv4 package so
@@ -107,22 +109,23 @@ type tagQueryEdge struct {
 
 // A repo tag and its creation date.
 type RepoTag struct {
-	Tag     string
-	TagDate time.Time
+	Tag        string
+	TagDate    time.Time
+	ModulePath string
 }
 
 // Retrieves all tags for a given repo.
 func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*RepoTag, error) {
 	var q tagQueryResponse
 
-	parts := strings.Split(orgRepoName, "/")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("expected org/name format, but got %d parts from %s", len(parts), orgRepoName)
+	repo, err := newRepo(scm.githubHostName, orgRepoName)
+	if err != nil {
+		return nil, fmt.Errorf("TagsForRepo: %v", err)
 	}
 
 	variables := map[string]any{
-		"repoOrg":    githubv4.String(parts[0]),
-		"repoName":   githubv4.String(parts[1]),
+		"repoOrg":    githubv4.String(repo.org),
+		"repoName":   githubv4.String(repo.name),
 		"tagsCursor": (*githubv4.String)(nil),
 	}
 
@@ -133,7 +136,7 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 		defer cancel()
 
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-			return nil, fmt.Errorf("error querying tags for %s: %w", orgRepoName, err)
+			return nil, fmt.Errorf("error querying tags for %s: %w", repo.fullName(), err)
 		}
 
 		for _, t := range q.Repository.Refs.Edges {
@@ -151,13 +154,75 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 				tag.TagDate = t.Node.Target.Tag.Tagger.Date.UTC()
 			}
 
+			var modulePath string
+			goModContents, err := scm.goModForRepo(ctx, repo, tag.Tag)
+			if err != nil {
+				slog.Error(fmt.Sprintf("error getting go.mod file for %s: %v. Defaulting to github url for module path", repo.fullName(), err))
+				modulePath = repo.asModulePath()
+			}
+
+			if modulePath == "" {
+				if goModContents == "" {
+					slog.Info(fmt.Sprintf("unable to find go.mod file in the root of the project for %s. Defaulting to github url for module path", repo.fullName()))
+					modulePath = repo.asModulePath()
+				} else {
+					file, err := modfile.Parse("go.mod", []byte(goModContents), nil)
+					if err != nil {
+						slog.Info(fmt.Sprintf("error parsing go.mod file for %s: %v. Defaulting to github url for module path", repo.fullName(), err))
+						modulePath = repo.asModulePath()
+					}
+
+					if file.Module != nil {
+						modulePath = file.Module.Mod.Path
+					}
+				}
+			}
+
+			tag.ModulePath = modulePath
 			results = append(results, &tag)
 		}
+
 		if !q.Repository.Refs.PageInfo.HasNextPage {
 			break
 		}
+
 		variables["tagsCursor"] = githubv4.NewString(q.Repository.Refs.PageInfo.EndCursor)
 	}
 
 	return results, nil
+}
+
+type goModQueryResult struct {
+	Repository struct {
+		RootGoMod struct {
+			Blob struct {
+				Text string
+			} `graphql:"... on Blob"`
+		} `graphql:"rootFile: object(expression: $goModRootPath)"`
+	} `graphql:"repository(owner: $repoOrg, name: $repoName)"`
+}
+
+// goModForRepo retrieves go.mod file for the repository so that we can inspect
+// its content and determine if the module path matches the repo URL or if the
+// module path is different and needs to be updated in the index. The latter
+// commonly occurs when a module has been migrated from one vcs to another
+// without changing the module path.
+func (scm *GithubSCM) goModForRepo(ctx context.Context, repo repo, tag string) (string, error) {
+	var q goModQueryResult
+
+	variables := map[string]any{
+		"repoOrg":       githubv4.String(repo.org),
+		"repoName":      githubv4.String(repo.name),
+		"goModRootPath": githubv4.String(fmt.Sprintf("%s:go.mod", tag)),
+	}
+
+	if err := scm.graphqlClient.Query(ctx, &q, variables); err != nil {
+		return "", fmt.Errorf("error querying go.mod for %s: %w", repo.fullName(), err)
+	}
+
+	if q.Repository.RootGoMod.Blob.Text != "" {
+		return q.Repository.RootGoMod.Blob.Text, nil
+	}
+
+	return "", nil
 }
