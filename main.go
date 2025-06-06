@@ -20,7 +20,6 @@ import (
 var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
 var githubAuthToken = flag.String("githubAuthToken", "", "github auth token")
-var debug = flag.Bool("debug", false, "enable debug logging")
 
 var allReposReindexWorkCheckPeriod = flag.Duration("allReposReindexWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work")
 var allReposReindexPeriod = flag.Duration("allReposReindexPeriod", 24*time.Hour, "duration between re-indexing list of all repos")
@@ -33,10 +32,6 @@ var repoTagsReindexTTL = flag.Duration("repoTagsReindexTTL", 10*time.Minute, "TT
 
 func main() {
 	flag.Parse()
-
-	if *debug {
-		slog.SetLogLoggerLevel(slog.LevelDebug)
-	}
 
 	if *githubHostName == "" || *githubAuthToken == "" {
 		slog.Info("--githubHostName (no http/https: github.mycompany.net) and --githubAuthToken are required")
