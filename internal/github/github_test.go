@@ -60,18 +60,18 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}{
 		{
 			reposURLs: []string{
-				"https://github.somecompany.net/corp/ftl-proxy",
-				"https://github.somecompany.net/corp/cloudgaming-ocgactl",
-				"https://github.somecompany.net/corp/cloudgaming-moby-fork",
+				"https://github.somecompany.net/someorg/ftl-proxy",
+				"https://github.somecompany.net/someorg/cloudgaming-ocgactl",
+				"https://github.somecompany.net/someorg/cloudgaming-moby-fork",
 			},
 			hasNextPage: true,
 			endCursor:   "somecursor",
 		},
 		{
 			reposURLs: []string{
-				"https://github.somecompany.net/corp/cloudgaming-tdd-grafana",
-				"https://github.somecompany.net/corp/cloudgaming-game-input-go",
-				"https://github.somecompany.net/corp/cpie-proxyd",
+				"https://github.somecompany.net/someorg/cloudgaming-tdd-grafana",
+				"https://github.somecompany.net/someorg/cloudgaming-game-input-go",
+				"https://github.somecompany.net/someorg/cpie-proxyd",
 			},
 		},
 	}
@@ -90,12 +90,12 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}
 
 	wantResults := []string{
-		"corp/ftl-proxy",
-		"corp/cloudgaming-ocgactl",
-		"corp/cloudgaming-moby-fork",
-		"corp/cloudgaming-tdd-grafana",
-		"corp/cloudgaming-game-input-go",
-		"corp/cpie-proxyd",
+		"someorg/ftl-proxy",
+		"someorg/cloudgaming-ocgactl",
+		"someorg/cloudgaming-moby-fork",
+		"someorg/cloudgaming-tdd-grafana",
+		"someorg/cloudgaming-game-input-go",
+		"someorg/cpie-proxyd",
 	}
 
 	if diff := cmp.Diff(wantResults, gotResults); diff != "" {
@@ -105,7 +105,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 
 func TestTagsForRepo_EmptyResponse(t *testing.T) {
 	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname)
-	got, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	got, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.corp.company.com/corp/repo1\n"},
+				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
 				{tag: "_gheMigrationPR-436", committedDate: date},
 				{tag: "_gheMigrationPR-437", committedDate: date},
 			},
@@ -133,7 +133,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		{
 			tags: []tagResponse{
 				{tag: "_gheMigrationPR-438", committedDate: date},
-				{tag: "_gheMigrationPR-439", committedDate: date, goModContent: "module stash.corp.company.com/corp/repo1\n"},
+				{tag: "_gheMigrationPR-439", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
 				{tag: "_gheMigrationPR-430", committedDate: date},
 			},
 		},
@@ -148,16 +148,16 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 	}
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.corp.company.com/corp/repo1"},
-		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
-		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
-		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
-		{Tag: "_gheMigrationPR-439", TagDate: date, ModulePath: "stash.corp.company.com/corp/repo1"},
-		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
+		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
+		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
+		{Tag: "_gheMigrationPR-439", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
 	}
 
 	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
-	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.corp.company.com/corp/repo1\n"},
+				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
 				{tag: "_gheMigrationPR-436", taggerDate: date},
 				{tag: "_gheMigrationPR-437", taggerDate: date},
 			},
@@ -191,13 +191,13 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 	}
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.corp.company.com/corp/repo1"},
-		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
-		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/corp/repo1"},
+		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
 	}
 
 	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
-	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
