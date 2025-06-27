@@ -6,9 +6,9 @@ import (
 )
 
 type repo struct {
-	hostname string
-	org      string
-	name     string
+	host string
+	org  string
+	name string
 }
 
 func newRepo(hostname, orgRepoName string) (repo, error) {
@@ -17,7 +17,7 @@ func newRepo(hostname, orgRepoName string) (repo, error) {
 		return repo{}, fmt.Errorf("expected org/name format, but got %d parts from %s", len(parts), orgRepoName)
 	}
 
-	return repo{hostname: hostname, org: parts[0], name: parts[1]}, nil
+	return repo{host: hostname, org: parts[0], name: parts[1]}, nil
 }
 
 func (r repo) fullName() string {
@@ -25,5 +25,5 @@ func (r repo) fullName() string {
 }
 
 func (r repo) asModulePath() string {
-	return fmt.Sprintf("%s/%s/%s", r.hostname, r.org, r.name)
+	return fmt.Sprintf("%s/%s/%s", r.host, r.org, r.name)
 }
