@@ -141,10 +141,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(t, response.tags, response.endCursor, response.hasNextPage))
-		for _, tag := range response.tags {
-			stubbedResponses = append(stubbedResponses, buildGoModQueryResult(t, tag.goModContent))
-		}
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, response.endCursor, response.hasNextPage)...)
 	}
 
 	wantTags := []*RepoTag{
@@ -184,10 +181,7 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(t, response.tags, "", false))
-		for _, tag := range response.tags {
-			stubbedResponses = append(stubbedResponses, buildGoModQueryResult(t, tag.goModContent))
-		}
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, "", false)...)
 	}
 
 	wantTags := []*RepoTag{
@@ -237,9 +231,10 @@ type tagResponse struct {
 	taggerDate    time.Time
 }
 
-func buildTagQueryResponse(t *testing.T, tags []tagResponse, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
+func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4.String, hasNextPage bool) []any {
 	t.Helper()
 
+	var goModResponses []any
 	var edges []tagQueryEdge
 
 	for _, tag := range tags {
@@ -252,21 +247,18 @@ func buildTagQueryResponse(t *testing.T, tags []tagResponse, endCursor githubv4.
 			edge.Node.Target.Tag.Tagger.Date = *githubv4.NewDateTime(githubv4.DateTime{Time: tag.taggerDate})
 		}
 		edges = append(edges, edge)
+
+		var q goModQueryResult
+		if tag.goModContent != "" {
+			q.Repository.RootGoMod.Blob.Text = tag.goModContent
+		}
+		goModResponses = append(goModResponses, q)
 	}
 
 	var q tagQueryResponse
 	q.Repository.Refs.Edges = edges
 	q.Repository.Refs.PageInfo.EndCursor = endCursor
 	q.Repository.Refs.PageInfo.HasNextPage = hasNextPage
-	return q
-}
 
-func buildGoModQueryResult(t *testing.T, rootGoModContents string) goModQueryResult {
-	t.Helper()
-
-	var q goModQueryResult
-	if rootGoModContents != "" {
-		q.Repository.RootGoMod.Blob.Text = rootGoModContents
-	}
-	return q
+	return append([]any{q}, goModResponses...)
 }
