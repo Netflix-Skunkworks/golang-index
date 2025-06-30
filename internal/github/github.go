@@ -162,26 +162,17 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 				tag.TagDate = t.Node.Target.Tag.Tagger.Date.UTC()
 			}
 
-			var modulePath string
-			goModContents, found, err := scm.goModForRepo(ctx, repo, tag.Tag)
+			modulePath := repo.asModulePath()
+
+			goModModulePath, found, err := scm.modulePathFromGoMod(ctx, repo, tag.Tag)
 			if err != nil {
 				slog.Error(fmt.Sprintf("error getting go.mod file for %s: %v. Defaulting to github url for module path", repo.fullName(), err))
-				modulePath = repo.asModulePath()
 			}
 
-			if !found {
-				slog.Info(fmt.Sprintf("unable to find go.mod file in the root of the project for %s. Defaulting to github url for module path", repo.fullName()))
-				modulePath = repo.asModulePath()
+			if found {
+				modulePath = goModModulePath
 			} else {
-				file, err := modfile.Parse("go.mod", goModContents, nil)
-				if err != nil {
-					slog.Info(fmt.Sprintf("error parsing go.mod file for %s (tag: %s): %v. Skipping this tag", repo.fullName(), tag.Tag, err))
-					continue
-				}
-
-				if file.Module != nil {
-					modulePath = file.Module.Mod.Path
-				}
+				slog.Info(fmt.Sprintf("unable to find go.mod file in the root of the project for %s. Defaulting to github url for module path", repo.fullName()))
 			}
 
 			tag.ModulePath = modulePath
@@ -203,7 +194,7 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 // module path is different and needs to be updated in the index. The latter
 // commonly occurs when a module has been migrated from one vcs to another
 // without changing the module path.
-func (scm *GithubSCM) goModForRepo(ctx context.Context, repo repo, tag string) ([]byte, bool, error) {
+func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag string) (string, bool, error) {
 	protocol := "http://"
 	if scm.useRawHTTPS {
 		protocol = "https://"
@@ -216,13 +207,13 @@ func (scm *GithubSCM) goModForRepo(ctx context.Context, repo repo, tag string) (
 		nil,
 	)
 	if err != nil {
-		return nil, false, fmt.Errorf("error building raw github API request: %v", err)
+		return "", false, fmt.Errorf("error building raw github API request: %v", err)
 	}
 	request.Header.Set("Authorization", fmt.Sprintf("token %s", scm.githubAuthToken))
 
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return nil, false, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
+		return "", false, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -230,17 +221,26 @@ func (scm *GithubSCM) goModForRepo(ctx context.Context, repo repo, tag string) (
 	// file in the root of the directory. This avoid extra noise in logs by not
 	// logging such case as an error.
 	if resp.StatusCode == 404 {
-		return nil, false, nil
+		return "", false, nil
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, false, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
+		return "", false, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, false, fmt.Errorf("error reading raw github API response: %v", err)
+		return "", false, fmt.Errorf("error reading raw github API response: %v", err)
 	}
 
-	return bodyBytes, true, nil
+	file, err := modfile.Parse("go.mod", bodyBytes, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("error parsing go.mod file for %s (tag: %s): %v", repo.fullName(), tag, err)
+	}
+
+	if file.Module != nil {
+		return file.Module.Mod.Path, true, nil
+	}
+
+	return "", false, nil
 }
