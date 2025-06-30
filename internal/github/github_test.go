@@ -2,8 +2,12 @@ package github
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +45,7 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 }
 
 func TestGoRepos_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname)
+	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname, "", false)
 	resultsChan := make(chan string)
 	got, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -82,7 +86,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, response)
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname, "", false)
 
 	gotResults, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -104,7 +108,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 }
 
 func TestTagsForRepo_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname)
+	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname, "", false)
 	got, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -139,21 +143,29 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		},
 	}
 
+	authToken := "test-token"
+	var tagResponses []tagResponse
+	for _, resp := range responses {
+		tagResponses = append(tagResponses, resp.tags...)
+	}
+	server, hostPort := createTestGoModServer(t, authToken, tagResponses)
+	defer server.Close()
+
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, response.endCursor, response.hasNextPage)...)
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, response.endCursor, response.hasNextPage))
 	}
 
 	wantTags := []*RepoTag{
 		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
-		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
-		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
-		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 		{Tag: "_gheMigrationPR-439", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
-		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
+		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, hostPort, authToken, false)
 	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -179,18 +191,26 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 		},
 	}
 
+	authToken := "test-token"
+	var tagResponses []tagResponse
+	for _, resp := range responses {
+		tagResponses = append(tagResponses, resp.tags...)
+	}
+	server, hostPort := createTestGoModServer(t, authToken, tagResponses)
+	defer server.Close()
+
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, "", false)...)
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, "", false))
 	}
 
 	wantTags := []*RepoTag{
 		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
-		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
-		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: "github.somecompany.net/someorg/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, hostPort, authToken, false)
 	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -231,10 +251,9 @@ type tagResponse struct {
 	taggerDate    time.Time
 }
 
-func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4.String, hasNextPage bool) []any {
+func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
 	t.Helper()
 
-	var goModResponses []any
 	var edges []tagQueryEdge
 
 	for _, tag := range tags {
@@ -247,12 +266,6 @@ func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4
 			edge.Node.Target.Tag.Tagger.Date = *githubv4.NewDateTime(githubv4.DateTime{Time: tag.taggerDate})
 		}
 		edges = append(edges, edge)
-
-		var q goModQueryResult
-		if tag.goModContent != "" {
-			q.Repository.RootGoMod.Blob.Text = tag.goModContent
-		}
-		goModResponses = append(goModResponses, q)
 	}
 
 	var q tagQueryResponse
@@ -260,5 +273,35 @@ func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4
 	q.Repository.Refs.PageInfo.EndCursor = endCursor
 	q.Repository.Refs.PageInfo.HasNextPage = hasNextPage
 
-	return append([]any{q}, goModResponses...)
+	return q
+}
+
+func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) (*httptest.Server, string) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != fmt.Sprintf("token %s", authToken) {
+			http.Error(w, "wrong Authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		urlParts := strings.Split(r.URL.String(), "/")
+		if len(urlParts) < 2 {
+			http.Error(w, fmt.Sprintf("unexpected url format: %s", r.URL.String()), http.StatusBadRequest)
+			return
+		}
+		wantTag := urlParts[len(urlParts)-2]
+
+		for _, tag := range tags {
+			if tag.tag == wantTag && tag.goModContent != "" {
+				//nolint:errcheck
+				w.Write([]byte(tag.goModContent))
+				return
+			}
+		}
+
+		http.NotFound(w, r)
+	}))
+
+	return server, strings.TrimPrefix(server.URL, "http://")
 }

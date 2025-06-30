@@ -55,7 +55,7 @@ func main() {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: *githubAuthToken})
 	graphqlClient := githubv4.NewEnterpriseClient(fullHost, oauth2.NewClient(ctx, src))
 
-	githubSCM := github.NewGithubSCM(graphqlClient, *githubHostName)
+	githubSCM := github.NewGithubSCM(graphqlClient, *githubHostName, *githubAuthToken, true)
 
 	server := newServer(*port, idb, *githubHostName)
 

@@ -4,7 +4,9 @@ package github
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -21,13 +23,19 @@ type githubClient interface {
 
 // A handle for specialised github querying.
 type GithubSCM struct {
-	graphqlClient  githubClient
-	githubHostName string
+	graphqlClient   githubClient
+	githubHostName  string
+	githubAuthToken string
+	useRawHTTPS     bool
 }
 
 // Creates a new Github SCM.
-func NewGithubSCM(client githubClient, githubHostName string) *GithubSCM {
-	return &GithubSCM{graphqlClient: client, githubHostName: githubHostName}
+func NewGithubSCM(client githubClient, githubHostName, githubAuthToken string, useRawHTTPS bool) *GithubSCM {
+	return &GithubSCM{graphqlClient: client,
+		githubHostName:  githubHostName,
+		githubAuthToken: githubAuthToken,
+		useRawHTTPS:     useRawHTTPS,
+	}
 }
 
 type repoQueryResult struct {
@@ -155,26 +163,24 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 			}
 
 			var modulePath string
-			goModContents, err := scm.goModForRepo(ctx, repo, tag.Tag)
+			goModContents, found, err := scm.goModForRepo(ctx, repo, tag.Tag)
 			if err != nil {
 				slog.Error(fmt.Sprintf("error getting go.mod file for %s: %v. Defaulting to github url for module path", repo.fullName(), err))
 				modulePath = repo.asModulePath()
 			}
 
-			if modulePath == "" {
-				if goModContents == "" {
-					slog.Info(fmt.Sprintf("unable to find go.mod file in the root of the project for %s. Defaulting to github url for module path", repo.fullName()))
-					modulePath = repo.asModulePath()
-				} else {
-					file, err := modfile.Parse("go.mod", []byte(goModContents), nil)
-					if err != nil {
-						slog.Info(fmt.Sprintf("error parsing go.mod file for %s: %v. Defaulting to github url for module path", repo.fullName(), err))
-						modulePath = repo.asModulePath()
-					}
+			if !found {
+				slog.Info(fmt.Sprintf("unable to find go.mod file in the root of the project for %s. Defaulting to github url for module path", repo.fullName()))
+				modulePath = repo.asModulePath()
+			} else {
+				file, err := modfile.Parse("go.mod", goModContents, nil)
+				if err != nil {
+					slog.Info(fmt.Sprintf("error parsing go.mod file for %s (tag: %s): %v. Skipping this tag", repo.fullName(), tag.Tag, err))
+					continue
+				}
 
-					if file.Module != nil {
-						modulePath = file.Module.Mod.Path
-					}
+				if file.Module != nil {
+					modulePath = file.Module.Mod.Path
 				}
 			}
 
@@ -192,37 +198,49 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 	return results, nil
 }
 
-type goModQueryResult struct {
-	Repository struct {
-		RootGoMod struct {
-			Blob struct {
-				Text string
-			} `graphql:"... on Blob"`
-		} `graphql:"rootFile: object(expression: $goModRootPath)"`
-	} `graphql:"repository(owner: $repoOrg, name: $repoName)"`
-}
-
 // goModForRepo retrieves go.mod file for the repository so that we can inspect
 // its content and determine if the module path matches the repo URL or if the
 // module path is different and needs to be updated in the index. The latter
 // commonly occurs when a module has been migrated from one vcs to another
 // without changing the module path.
-func (scm *GithubSCM) goModForRepo(ctx context.Context, repo repo, tag string) (string, error) {
-	var q goModQueryResult
-
-	variables := map[string]any{
-		"repoOrg":       githubv4.String(repo.org),
-		"repoName":      githubv4.String(repo.name),
-		"goModRootPath": githubv4.String(fmt.Sprintf("%s:go.mod", tag)),
+func (scm *GithubSCM) goModForRepo(ctx context.Context, repo repo, tag string) ([]byte, bool, error) {
+	protocol := "http://"
+	if scm.useRawHTTPS {
+		protocol = "https://"
 	}
 
-	if err := scm.graphqlClient.Query(ctx, &q, variables); err != nil {
-		return "", fmt.Errorf("error querying go.mod for %s: %w", repo.fullName(), err)
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s%s/raw/%s/%s/%s/go.mod", protocol, scm.githubHostName, repo.org, repo.name, tag),
+		nil,
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("error building raw github API request: %v", err)
+	}
+	request.Header.Set("Authorization", fmt.Sprintf("token %s", scm.githubAuthToken))
+
+	resp, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, false, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// we expect 404 to be returned for a lot of repos which don't have go.mod
+	// file in the root of the directory. This avoid extra noise in logs by not
+	// logging such case as an error.
+	if resp.StatusCode == 404 {
+		return nil, false, nil
 	}
 
-	if q.Repository.RootGoMod.Blob.Text != "" {
-		return q.Repository.RootGoMod.Blob.Text, nil
+	if resp.StatusCode >= 400 {
+		return nil, false, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
 	}
 
-	return "", nil
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, fmt.Errorf("error reading raw github API response: %v", err)
+	}
+
+	return bodyBytes, true, nil
 }
