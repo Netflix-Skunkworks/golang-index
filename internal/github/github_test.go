@@ -137,7 +137,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		{
 			tags: []tagResponse{
 				{tag: "_gheMigrationPR-438", committedDate: date},
-				{tag: "_gheMigrationPR-439", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
+				{tag: "_gheMigrationPR-439", committedDate: date, goModContent: "module invalid/module/path"},
 				{tag: "_gheMigrationPR-430", committedDate: date},
 			},
 		},
@@ -161,7 +161,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
-		{Tag: "_gheMigrationPR-439", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		// {Tag: "_gheMigrationPR-439"}:  tags with invalid go.mod content are skipped entirely.
 		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 	}
 

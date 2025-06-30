@@ -12,6 +12,7 @@ import (
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 // githubClient wraps query interface from the shurcooL/githubv4 package so
@@ -166,6 +167,12 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 
 			goModModulePath, found, err := scm.modulePathFromGoMod(ctx, repo, tag.Tag)
 			if err != nil {
+				// if go.mod file was found but turned out to be invalid, we want to skip the tag entirely
+				if found {
+					slog.Error(fmt.Sprintf("found go.mod file for %s but it's invalid: %v. Skipping the tag", repo.fullName(), err))
+					continue
+				}
+
 				slog.Error(fmt.Sprintf("error getting go.mod file for %s: %v. Defaulting to github url for module path", repo.fullName(), err))
 			}
 
@@ -239,6 +246,11 @@ func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag st
 	}
 
 	if file.Module != nil {
+		err := module.CheckPath(file.Module.Mod.Path)
+		if err != nil {
+			return "", true, fmt.Errorf("invalid module path found for %s (tag: %s): %v", repo.fullName(), tag, err)
+		}
+
 		return file.Module.Mod.Path, true, nil
 	}
 
