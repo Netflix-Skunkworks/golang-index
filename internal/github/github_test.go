@@ -294,8 +294,9 @@ func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) (
 
 		for _, tag := range tags {
 			if tag.tag == wantTag && tag.goModContent != "" {
-				//nolint:errcheck
-				w.Write([]byte(tag.goModContent))
+				if _, err := w.Write([]byte(tag.goModContent)); err != nil {
+					t.Fatal(err)
+				}
 				return
 			}
 		}
