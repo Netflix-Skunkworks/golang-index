@@ -224,7 +224,7 @@ func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag st
 		return "", false, nil
 	}
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode != 200 {
 		return "", false, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
 	}
 
