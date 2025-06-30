@@ -169,8 +169,8 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 	var conditionalStrings []string
 	var conditionalArgs []any
 
-	// number of fields in the SQL query used to correctly number query
-	// placeholders
+	// Number of fields in the SQL query used to correctly number query
+	// placeholders.
 	const fieldCount = 4
 
 	orgRepoNames := make(map[string]bool)
