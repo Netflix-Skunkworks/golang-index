@@ -2,8 +2,12 @@ package github
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +45,7 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 }
 
 func TestGoRepos_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname)
+	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname, "", false)
 	resultsChan := make(chan string)
 	got, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -60,18 +64,18 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}{
 		{
 			reposURLs: []string{
-				"https://github.somecompany.net/corp/ftl-proxy",
-				"https://github.somecompany.net/corp/cloudgaming-ocgactl",
-				"https://github.somecompany.net/corp/cloudgaming-moby-fork",
+				"https://github.somecompany.net/someorg/ftl-proxy",
+				"https://github.somecompany.net/someorg/cloudgaming-ocgactl",
+				"https://github.somecompany.net/someorg/cloudgaming-moby-fork",
 			},
 			hasNextPage: true,
 			endCursor:   "somecursor",
 		},
 		{
 			reposURLs: []string{
-				"https://github.somecompany.net/corp/cloudgaming-tdd-grafana",
-				"https://github.somecompany.net/corp/cloudgaming-game-input-go",
-				"https://github.somecompany.net/corp/cpie-proxyd",
+				"https://github.somecompany.net/someorg/cloudgaming-tdd-grafana",
+				"https://github.somecompany.net/someorg/cloudgaming-game-input-go",
+				"https://github.somecompany.net/someorg/cpie-proxyd",
 			},
 		},
 	}
@@ -82,7 +86,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, response)
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname, "", false)
 
 	gotResults, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -90,12 +94,12 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}
 
 	wantResults := []string{
-		"corp/ftl-proxy",
-		"corp/cloudgaming-ocgactl",
-		"corp/cloudgaming-moby-fork",
-		"corp/cloudgaming-tdd-grafana",
-		"corp/cloudgaming-game-input-go",
-		"corp/cpie-proxyd",
+		"someorg/ftl-proxy",
+		"someorg/cloudgaming-ocgactl",
+		"someorg/cloudgaming-moby-fork",
+		"someorg/cloudgaming-tdd-grafana",
+		"someorg/cloudgaming-game-input-go",
+		"someorg/cpie-proxyd",
 	}
 
 	if diff := cmp.Diff(wantResults, gotResults); diff != "" {
@@ -104,8 +108,8 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 }
 
 func TestTagsForRepo_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname)
-	got, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname, "", false)
+	got, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +127,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date},
+				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
 				{tag: "_gheMigrationPR-436", committedDate: date},
 				{tag: "_gheMigrationPR-437", committedDate: date},
 			},
@@ -133,28 +137,36 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		{
 			tags: []tagResponse{
 				{tag: "_gheMigrationPR-438", committedDate: date},
-				{tag: "_gheMigrationPR-439", committedDate: date},
+				{tag: "_gheMigrationPR-439", committedDate: date, goModContent: "module invalid/module/path"},
 				{tag: "_gheMigrationPR-430", committedDate: date},
 			},
 		},
 	}
 
+	authToken := "test-token"
+	var tagResponses []tagResponse
+	for _, resp := range responses {
+		tagResponses = append(tagResponses, resp.tags...)
+	}
+	server, hostPort := createTestGoModServer(t, authToken, tagResponses)
+	defer server.Close()
+
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, response.endCursor, response.hasNextPage))
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, response.endCursor, response.hasNextPage))
 	}
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date},
-		{Tag: "_gheMigrationPR-436", TagDate: date},
-		{Tag: "_gheMigrationPR-437", TagDate: date},
-		{Tag: "_gheMigrationPR-438", TagDate: date},
-		{Tag: "_gheMigrationPR-439", TagDate: date},
-		{Tag: "_gheMigrationPR-430", TagDate: date},
+		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		// {Tag: "_gheMigrationPR-439"}:  tags with invalid go.mod content are skipped entirely.
+		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname)
-	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, hostPort, authToken, false)
+	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,26 +184,34 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date},
+				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
 				{tag: "_gheMigrationPR-436", taggerDate: date},
 				{tag: "_gheMigrationPR-437", taggerDate: date},
 			},
 		},
 	}
 
+	authToken := "test-token"
+	var tagResponses []tagResponse
+	for _, resp := range responses {
+		tagResponses = append(tagResponses, resp.tags...)
+	}
+	server, hostPort := createTestGoModServer(t, authToken, tagResponses)
+	defer server.Close()
+
 	var stubbedResponses []any
 	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponse(response.tags, "", false))
+		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, "", false))
 	}
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date},
-		{Tag: "_gheMigrationPR-436", TagDate: date},
-		{Tag: "_gheMigrationPR-437", TagDate: date},
+		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "")
-	gotTags, err := sut.TagsForRepo(t.Context(), "corp/repo1")
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, hostPort, authToken, false)
+	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,11 +246,14 @@ func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.S
 
 type tagResponse struct {
 	tag           string
+	goModContent  string
 	committedDate time.Time
 	taggerDate    time.Time
 }
 
-func buildTagQueryResponse(tags []tagResponse, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
+func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4.String, hasNextPage bool) tagQueryResponse {
+	t.Helper()
+
 	var edges []tagQueryEdge
 
 	for _, tag := range tags {
@@ -249,5 +272,37 @@ func buildTagQueryResponse(tags []tagResponse, endCursor githubv4.String, hasNex
 	q.Repository.Refs.Edges = edges
 	q.Repository.Refs.PageInfo.EndCursor = endCursor
 	q.Repository.Refs.PageInfo.HasNextPage = hasNextPage
+
 	return q
+}
+
+func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) (*httptest.Server, string) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != fmt.Sprintf("token %s", authToken) {
+			http.Error(w, "wrong Authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		urlParts := strings.Split(r.URL.String(), "/")
+		if len(urlParts) < 2 {
+			http.Error(w, fmt.Sprintf("unexpected url format: %s", r.URL.String()), http.StatusBadRequest)
+			return
+		}
+		wantTag := urlParts[len(urlParts)-2]
+
+		for _, tag := range tags {
+			if tag.tag == wantTag && tag.goModContent != "" {
+				if _, err := w.Write([]byte(tag.goModContent)); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		}
+
+		http.NotFound(w, r)
+	}))
+
+	return server, strings.TrimPrefix(server.URL, "http://")
 }

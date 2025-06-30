@@ -55,7 +55,7 @@ func main() {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: *githubAuthToken})
 	graphqlClient := githubv4.NewEnterpriseClient(fullHost, oauth2.NewClient(ctx, src))
 
-	githubSCM := github.NewGithubSCM(graphqlClient, *githubHostName)
+	githubSCM := github.NewGithubSCM(graphqlClient, *githubHostName, *githubAuthToken, true)
 
 	server := newServer(*port, idb, *githubHostName)
 
@@ -126,7 +126,12 @@ func main() {
 				}
 				var dbRepoTags []*db.RepoTag
 				for _, rt := range repoTags {
-					dbRepoTags = append(dbRepoTags, &db.RepoTag{OrgRepoName: repoToReindex, TagName: rt.Tag, Created: rt.TagDate})
+					dbRepoTags = append(dbRepoTags, &db.RepoTag{
+						OrgRepoName: repoToReindex,
+						TagName:     rt.Tag,
+						ModulePath:  rt.ModulePath,
+						Created:     rt.TagDate,
+					})
 				}
 				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d tags... storing results", repoToReindex, len(repoTags)))
 				if err := idb.StoreRepoTags(grpCtx, dbRepoTags); err != nil {

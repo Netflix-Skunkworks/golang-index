@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS repo_tags;
+DROP TABLE IF EXISTS repos;
+DROP TABLE IF EXISTS repo_indexing;

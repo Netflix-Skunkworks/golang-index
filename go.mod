@@ -8,6 +8,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/shurcooL/githubv4 v0.0.0-20240727222349-48295856cce7
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0
+	golang.org/x/mod v0.21.0
 	golang.org/x/oauth2 v0.27.0
 	golang.org/x/sync v0.13.0
 )
