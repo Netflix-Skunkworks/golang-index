@@ -37,12 +37,15 @@ type module struct {
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	slog.Info(fmt.Sprintf("received index request wtih query params ?since=%q and ?limit=%q", r.URL.Query().Get("since"), r.URL.Query().Get("limit")))
 	var since time.Time
 	var err error
 	if sinceParam := r.URL.Query().Get("since"); sinceParam != "" {
 		since, err = time.Parse(time.RFC3339, sinceParam)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("error converting 'since' param %s: %v", sinceParam, err), http.StatusBadRequest)
+			errStr := fmt.Sprintf("error converting 'since' param %s: %v", sinceParam, err)
+			slog.Error(errStr)
+			http.Error(w, errStr, http.StatusBadRequest)
 			return
 		}
 	}
@@ -50,14 +53,18 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	limit := defaultNumberOfOutputs
 	if limitParam := r.URL.Query().Get("limit"); limitParam != "" {
 		if limit, err = strconv.ParseInt(limitParam, 10, 64); err != nil {
-			http.Error(w, fmt.Sprintf("error converting 'limit' param %s: %v", limitParam, err), http.StatusBadRequest)
+			errStr := fmt.Sprintf("error converting 'limit' param %s: %v", limitParam, err)
+			slog.Error(errStr)
+			http.Error(w, errStr, http.StatusBadRequest)
 			return
 		}
 	}
 
 	repoTags, err := s.idb.FetchRepoTags(r.Context(), since, limit)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("error fetching repo tags: %v", err), http.StatusInternalServerError)
+		errStr := fmt.Sprintf("error fetching repo tags: %v", err)
+		slog.Error(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
 		return
 	}
 
@@ -69,7 +76,9 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			Timestamp: rt.Created.Format(time.RFC3339),
 		})
 		if err != nil {
-			http.Error(w, fmt.Sprintf("error marshalling response for %v: %v", rt, err), http.StatusInternalServerError)
+			errStr := fmt.Sprintf("error marshalling response for %v: %v", rt, err)
+			slog.Error(errStr)
+			http.Error(w, errStr, http.StatusInternalServerError)
 			return
 		}
 
@@ -77,7 +86,9 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := fmt.Fprint(w, strings.Join(lines, "\n")); err != nil {
-		http.Error(w, fmt.Sprintf("error writing response: %v", err), http.StatusInternalServerError)
+		errStr := fmt.Sprintf("error writing response: %v", err)
+		slog.Error(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
 		return
 	}
 }
