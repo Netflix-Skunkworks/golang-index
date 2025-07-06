@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Netflix-Skunkworks/golang-index/internal"
 	"github.com/Netflix-Skunkworks/golang-index/internal/db"
 	"github.com/Netflix-Skunkworks/golang-index/internal/github"
 	"github.com/shurcooL/githubv4"
@@ -59,6 +60,13 @@ func main() {
 
 	server := newServer(*port, idb, *githubHostName)
 
+	// Backoff for GitHub issues.
+	githubBackoff := &internal.Backoff{
+		Initial:    30 * time.Second,
+		Multiplier: 1.5,
+		Max:        5 * time.Minute,
+	}
+
 	grp, grpCtx := errgroup.WithContext(ctx)
 
 	// TODO(jbarkhuysen): This should probably be in a function that's tested.
@@ -73,8 +81,14 @@ func main() {
 				slog.Info("should re-index all Go repos: yes")
 				allRepos, err := githubSCM.GoRepos(grpCtx)
 				if err != nil {
-					// TODO(issues/21): Handle 429 Too Many requests by performing exponential backoff.
-					return fmt.Errorf("error fetching all Go repos: %v", err)
+					// TODO(jbarkhuysen): Add some metrics/alerting here.
+					slog.Error(fmt.Sprintf("error fetching all Go repos: %v", err))
+					select {
+					case <-time.After(githubBackoff.Pause()):
+						continue
+					case <-grpCtx.Done():
+						return grpCtx.Err()
+					}
 				}
 				if err := idb.StoreRepos(ctx, allRepos); err != nil {
 					return fmt.Errorf("error storing all repos: %v", err)
@@ -118,8 +132,14 @@ func main() {
 				logger.Info(fmt.Sprintf("repo tags re-indexing: got work for repo %s", repoToReindex))
 				repoTags, err := githubSCM.TagsForRepo(grpCtx, repoToReindex)
 				if err != nil {
-					// TODO(issues/21): Handle 429 Too Many requests by performing exponential backoff.
-					return fmt.Errorf("erroring fetching all repo tags: %v", err)
+					// TODO(jbarkhuysen): Add some metrics/alerting here.
+					slog.Error(fmt.Sprintf("erroring fetching all repo tags: %v", err))
+					select {
+					case <-time.After(githubBackoff.Pause()):
+						continue
+					case <-grpCtx.Done():
+						return grpCtx.Err()
+					}
 				}
 				if len(repoTags) == 0 {
 					continue
