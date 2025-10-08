@@ -16,10 +16,10 @@ func TestFetchRepoTags(t *testing.T) {
 	resetTables(t, sqlDB)
 
 	allTags := []*db.RepoTag{
-		// Ordered by Created DESC, which is how we expect it returned.
-		{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().Add(time.Minute)},
-		{OrgRepoName: "foo/bar", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(time.Second)},
+		// Ordered by Created ASC (ascending chronological order), which is how we expect it returned.
 		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now()},
+		{OrgRepoName: "foo/bar", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(time.Second)},
+		{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().Add(time.Minute)},
 	}
 	populateRepoTags(t, sqlDB, allTags)
 
@@ -46,7 +46,7 @@ func TestFetchRepoTags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if diff := cmp.Diff(allTags[:1], gotTags, cmpopts.EquateApproxTime(time.Second)); diff != "" {
+	if diff := cmp.Diff(allTags[2:], gotTags, cmpopts.EquateApproxTime(time.Second)); diff != "" {
 		t.Errorf("FetchRepoTags: -want,+got: %s", diff)
 	}
 }

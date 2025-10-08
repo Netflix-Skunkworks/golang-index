@@ -10,7 +10,7 @@ Running the binary & tests requires standing up postgres:
 ```sh
 export POSTGRES_USERNAME=postgres
 export POSTGRES_PASSWORD=postgres
-export POSTGRES_HOST=0.0.0.0
+export POSTGRES_HOST=127.0.0.1
 export POSTGRES_PORT=55432 # In case 5432 is in use already.
 export POSTGRES_DB=index
 docker run \
