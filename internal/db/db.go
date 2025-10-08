@@ -52,7 +52,7 @@ func (d *DB) FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([
 SELECT org_repo_name, tag_name, module_path, created
 FROM repo_tags
 WHERE created >= $1
-ORDER BY created DESC
+ORDER BY created ASC
 LIMIT $2;`
 
 	rows, err := d.db.QueryContext(ctx, query, since, limit)
