@@ -24,18 +24,19 @@ type githubClient interface {
 
 // A handle for specialised github querying.
 type GithubSCM struct {
-	graphqlClient   githubClient
-	githubHostName  string
-	githubAuthToken string
-	useRawHTTPS     bool
+	graphqlClient  githubClient
+	githubHostName string
+	httpClient     *http.Client
+	useRawHTTPS    bool
 }
 
 // Creates a new Github SCM.
-func NewGithubSCM(client githubClient, githubHostName, githubAuthToken string, useRawHTTPS bool) *GithubSCM {
-	return &GithubSCM{graphqlClient: client,
-		githubHostName:  githubHostName,
-		githubAuthToken: githubAuthToken,
-		useRawHTTPS:     useRawHTTPS,
+func NewGithubSCM(client githubClient, githubHostName string, httpClient *http.Client, useRawHTTPS bool) *GithubSCM {
+	return &GithubSCM{
+		graphqlClient:  client,
+		githubHostName: githubHostName,
+		httpClient:     httpClient,
+		useRawHTTPS:    useRawHTTPS,
 	}
 }
 
@@ -216,9 +217,8 @@ func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag st
 	if err != nil {
 		return "", false, fmt.Errorf("error building raw github API request: %v", err)
 	}
-	request.Header.Set("Authorization", fmt.Sprintf("token %s", scm.githubAuthToken))
 
-	resp, err := http.DefaultClient.Do(request)
+	resp, err := scm.httpClient.Do(request)
 	if err != nil {
 		return "", false, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
 	}
