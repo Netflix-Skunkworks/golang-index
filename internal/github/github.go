@@ -24,19 +24,22 @@ type githubClient interface {
 
 // A handle for specialised github querying.
 type GithubSCM struct {
-	graphqlClient  githubClient
+	graphqlClient githubClient
+	// baseURL is where requests are sent; it may be a proxy in front of the
+	// GitHub Enterprise host, so it can differ from githubHostName.
+	baseURL string
+	// githubHostName is used for module paths and repo URLs, not for connecting.
 	githubHostName string
 	httpClient     *http.Client
-	useRawHTTPS    bool
 }
 
 // Creates a new Github SCM.
-func NewGithubSCM(client githubClient, githubHostName string, httpClient *http.Client, useRawHTTPS bool) *GithubSCM {
+func NewGithubSCM(client githubClient, baseURL, githubHostName string, httpClient *http.Client) *GithubSCM {
 	return &GithubSCM{
 		graphqlClient:  client,
+		baseURL:        baseURL,
 		githubHostName: githubHostName,
 		httpClient:     httpClient,
-		useRawHTTPS:    useRawHTTPS,
 	}
 }
 
@@ -203,15 +206,10 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 // commonly occurs when a module has been migrated from one vcs to another
 // without changing the module path.
 func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag string) (string, bool, error) {
-	protocol := "http://"
-	if scm.useRawHTTPS {
-		protocol = "https://"
-	}
-
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		fmt.Sprintf("%s%s/raw/%s/%s/%s/go.mod", protocol, scm.githubHostName, repo.org, repo.name, tag),
+		fmt.Sprintf("%s/raw/%s/%s/%s/go.mod", scm.baseURL, repo.org, repo.name, tag),
 		nil,
 	)
 	if err != nil {

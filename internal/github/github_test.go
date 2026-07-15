@@ -45,7 +45,7 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 }
 
 func TestGoRepos_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname, nil, false)
+	sut := NewGithubSCM(&mockGithubClient{}, "", testGithubHostname, nil)
 	resultsChan := make(chan string)
 	got, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -86,7 +86,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, response)
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, testGithubHostname, nil, false)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "", testGithubHostname, nil)
 
 	gotResults, err := sut.GoRepos(t.Context())
 	if err != nil {
@@ -108,7 +108,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 }
 
 func TestTagsForRepo_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, testGithubHostname, nil, false)
+	sut := NewGithubSCM(&mockGithubClient{}, "", testGithubHostname, nil)
 	got, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, hostPort, TokenClient(authToken), false)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, hostPort, TokenClient(authToken))
 	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +210,7 @@ func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, hostPort, TokenClient(authToken), false)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, hostPort, TokenClient(authToken))
 	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
