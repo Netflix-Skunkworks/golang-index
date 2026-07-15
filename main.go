@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Netflix-Skunkworks/golang-index/internal"
@@ -20,6 +21,7 @@ import (
 
 var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
+var githubBaseURL = flag.String("githubBaseURL", "", "base URL for API and raw requests, e.g. https://gitproxy.mycompany.net to route through a proxy. defaults to https://<githubHostName>. module paths and repo URLs always use -githubHostName")
 
 var githubAuthToken = flag.String("githubAuthToken", "", "github personal access token. alternative to -githubTLSClientCertFile/-githubTLSClientKeyFile")
 var githubTLSClientCertFile = flag.String("githubTLSClientCertFile", "", "client certificate for mutual-TLS auth to the github host. alternative to -githubAuthToken")
@@ -62,10 +64,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	fullHost := fmt.Sprintf("https://%s/api/graphql", *githubHostName)
-	graphqlClient := githubv4.NewEnterpriseClient(fullHost, httpClient)
+	baseURL := *githubBaseURL
+	if baseURL == "" {
+		baseURL = fmt.Sprintf("https://%s", *githubHostName)
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
 
-	githubSCM := github.NewGithubSCM(graphqlClient, *githubHostName, httpClient, true)
+	graphqlClient := githubv4.NewEnterpriseClient(baseURL+"/api/graphql", httpClient)
+
+	githubSCM := github.NewGithubSCM(graphqlClient, baseURL, *githubHostName, httpClient)
 
 	server := newServer(*port, idb, *githubHostName)
 

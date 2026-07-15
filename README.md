@@ -27,7 +27,20 @@ docker run \
 # Stand up postgres.
 go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 migrate -source file://migrations -database "postgres://$POSTGRES_USERNAME:$POSTGRES_PASSWORD@$POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB?sslmode=disable" up
-go run . -githubHostName=... -githubAuthToken=...
+
+# Authenticate with a personal access token:
+go run . -githubHostName=github.mycompany.net -githubAuthToken=...
+
+# ...or with mutual TLS, optionally routing through a proxy that terminates it.
+# -githubHostName is still the GitHub Enterprise host used for module paths and
+# repo URLs; -githubBaseURL is where requests are actually sent (defaults to
+# https://<githubHostName>).
+go run . \
+    -githubHostName=github.mycompany.net \
+    -githubBaseURL=https://gitproxy.mycompany.net \
+    -githubTLSClientCertFile=/path/to/client.crt \
+    -githubTLSClientKeyFile=/path/to/client.key \
+    -githubTLSCACertFile=/path/to/ca.pem
 ```
 
 ## Running tests
