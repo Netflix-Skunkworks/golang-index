@@ -205,7 +205,10 @@ func newGithubHTTPClient() (*http.Client, error) {
 		slog.Info("github auth: personal access token", "host", *githubHostName)
 		return github.TokenClient(*githubAuthToken), nil
 	default:
-		return nil, fmt.Errorf("no github auth configured: set -githubAuthToken or -githubTLSClientCertFile/-githubTLSClientKeyFile")
+		// No in-app auth: requests go out unauthenticated. Use this when a proxy
+		// in front of the host (see -githubBaseURL) supplies the credentials.
+		slog.Info("github auth: none (delegated to -githubBaseURL proxy)", "host", *githubHostName)
+		return &http.Client{}, nil
 	}
 }
 
