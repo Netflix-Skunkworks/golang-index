@@ -10,7 +10,7 @@ import (
 	"time"
 
 	// TODO(jbarkhuysen): Consider switching to pgx instead.
-	_ "github.com/lib/pq" // Postgres driver.
+	"github.com/lib/pq" // Postgres driver; also provides pq.Array.
 )
 
 // A db handle with specialised logic for indexing.
@@ -43,16 +43,23 @@ type RepoTag struct {
 	OrgRepoName string
 	TagName     string
 	ModulePath  string
-	Created     time.Time
+	// Created is the git tag's own creation date.
+	Created time.Time
+	// IndexedAt is when this index first observed the tag. The /index feed is
+	// keyed on this so it behaves like an append-only log. It is assigned by the
+	// DB on insert (column DEFAULT); StoreRepoTags ignores any value set here.
+	IndexedAt time.Time
 }
 
 // Fetches repo tags.
 func (d *DB) FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([]*RepoTag, error) {
+	// Filtered and ordered by indexed_at so consumers can poll forward with
+	// ?since=; see RepoTag.IndexedAt.
 	query := `
-SELECT org_repo_name, tag_name, module_path, created
+SELECT org_repo_name, tag_name, module_path, created, indexed_at
 FROM repo_tags
-WHERE created >= $1
-ORDER BY created ASC
+WHERE indexed_at >= $1
+ORDER BY indexed_at ASC
 LIMIT $2;`
 
 	rows, err := d.db.QueryContext(ctx, query, since, limit)
@@ -63,7 +70,7 @@ LIMIT $2;`
 	var repoTags []*RepoTag
 	for rows.Next() {
 		var rt RepoTag
-		if err := rows.Scan(&rt.OrgRepoName, &rt.TagName, &rt.ModulePath, &rt.Created); err != nil {
+		if err := rows.Scan(&rt.OrgRepoName, &rt.TagName, &rt.ModulePath, &rt.Created, &rt.IndexedAt); err != nil {
 			return nil, fmt.Errorf("FetchRepoTags: %v", err)
 		}
 		repoTags = append(repoTags, &rt)
@@ -164,16 +171,16 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 		return fmt.Errorf("StoreRepoTags called with 0 repo tags")
 	}
 
-	var valueStrings []string
-	var valueArgs []any
-	var conditionalStrings []string
-	var conditionalArgs []any
-
-	// Number of fields in the SQL query used to correctly number query
-	// placeholders.
+	// Number of fields in the INSERT below, used to number its placeholders.
 	const fieldCount = 4
 
+	var valueStrings []string
+	var valueArgs []any
 	orgRepoNames := make(map[string]bool)
+	// keepRepos/keepTags zip the authoritative incoming (org_repo_name, tag_name)
+	// pairs into parallel arrays for the delete-stale anti-join below.
+	keepRepos := make([]string, len(repoTags))
+	keepTags := make([]string, len(repoTags))
 	for i, rt := range repoTags {
 		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", fieldCount*i+1, fieldCount*i+2, fieldCount*i+3, fieldCount*i+4))
 		valueArgs = append(valueArgs, rt.OrgRepoName)
@@ -181,16 +188,12 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 		valueArgs = append(valueArgs, rt.ModulePath)
 		valueArgs = append(valueArgs, rt.Created.Format(time.RFC3339))
 		orgRepoNames[rt.OrgRepoName] = true
+		keepRepos[i] = rt.OrgRepoName
+		keepTags[i] = rt.TagName
 	}
-	i := 1
+	repoList := make([]string, 0, len(orgRepoNames))
 	for orgRepoName := range orgRepoNames {
-		if len(conditionalStrings) == 0 {
-			conditionalStrings = append(conditionalStrings, fmt.Sprintf("WHERE org_repo_name = $%d", i))
-		} else {
-			conditionalStrings = append(conditionalStrings, fmt.Sprintf("OR org_repo_name = $%d", i))
-		}
-		conditionalArgs = append(conditionalArgs, orgRepoName)
-		i++
+		repoList = append(repoList, orgRepoName)
 	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -200,8 +203,20 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
 
-	query := "DELETE FROM repo_tags " + strings.Join(conditionalStrings, "\n")
-	if _, err := tx.ExecContext(ctx, query, conditionalArgs...); err != nil {
+	// Delete only STALE tags: those stored for these repos but absent from the
+	// authoritative incoming set. Surviving rows are kept so their first-seen
+	// indexed_at persists across re-indexing; new tags get a fresh indexed_at
+	// from the column DEFAULT below.
+	query := `
+DELETE FROM repo_tags rt
+WHERE rt.org_repo_name = ANY($1)
+AND NOT EXISTS (
+    SELECT 1
+    FROM unnest($2::text[], $3::text[]) AS keep(org_repo_name, tag_name)
+    WHERE keep.org_repo_name = rt.org_repo_name
+    AND keep.tag_name = rt.tag_name
+);`
+	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepTags)); err != nil {
 		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)
 	}
 
@@ -214,9 +229,11 @@ SET created = EXCLUDED.created;`, strings.Join(valueStrings, ",\n"))
 		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)
 	}
 
-	query = `UPDATE repos
-SET indexing_finished = NOW()` + "\n" + strings.Join(conditionalStrings, "\n")
-	if _, err := tx.ExecContext(ctx, query, conditionalArgs...); err != nil {
+	query = `
+UPDATE repos
+SET indexing_finished = NOW()
+WHERE org_repo_name = ANY($1);`
+	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList)); err != nil {
 		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)
 	}
 

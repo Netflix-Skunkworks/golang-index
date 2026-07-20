@@ -15,16 +15,18 @@ func TestFetchRepoTags(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 
+	now := time.Now()
+	// Ordered by IndexedAt ASC, as FetchRepoTags returns. The out-of-order Created
+	// dates ensure the ordering can only come from IndexedAt.
 	allTags := []*db.RepoTag{
-		// Ordered by Created ASC (ascending chronological order), which is how we expect it returned.
-		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now()},
-		{OrgRepoName: "foo/bar", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(time.Second)},
-		{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().Add(time.Minute)},
+		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now},
+		{OrgRepoName: "foo/bar", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/bar", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now.Add(time.Second)},
+		{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now.Add(time.Minute)},
 	}
 	populateRepoTags(t, sqlDB, allTags)
 
 	// Get all.
-	gotTags, err := sutDB.FetchRepoTags(t.Context(), time.Now().Add(-1*time.Hour), 1000)
+	gotTags, err := sutDB.FetchRepoTags(t.Context(), now.Add(-1*time.Hour), 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +35,7 @@ func TestFetchRepoTags(t *testing.T) {
 	}
 
 	// Get with limit.
-	gotTags, err = sutDB.FetchRepoTags(t.Context(), time.Now().Add(-1*time.Hour), 2)
+	gotTags, err = sutDB.FetchRepoTags(t.Context(), now.Add(-1*time.Hour), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,8 +43,8 @@ func TestFetchRepoTags(t *testing.T) {
 		t.Errorf("FetchRepoTags: -want,+got: %s", diff)
 	}
 
-	// Get with since.
-	gotTags, err = sutDB.FetchRepoTags(t.Context(), time.Now().Add(2*time.Second), 1)
+	// Get with since: only the third tag was indexed after now+2s.
+	gotTags, err = sutDB.FetchRepoTags(t.Context(), now.Add(2*time.Second), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
