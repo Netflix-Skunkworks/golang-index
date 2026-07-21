@@ -21,12 +21,12 @@ func (fake *fakeDB) FetchRepoTags(ctx context.Context, since time.Time, limit in
 }
 
 func TestHandleIndex(t *testing.T) {
-	// The feed emits IndexedAt, so the expected Timestamps below are the
-	// IndexedAt values.
+	// These tags share a wall-clock second and differ only sub-second, which the
+	// feed must preserve.
 	fakeTags := []*db.RepoTag{
-		{OrgRepoName: "someorg/repo1", TagName: "tag1", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
-		{OrgRepoName: "someorg/repo1", TagName: "tag2", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
-		{OrgRepoName: "someorg/repo1", TagName: "tag3", ModulePath: "stash.somecompany.net/someorg/repo1", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
+		{OrgRepoName: "someorg/repo1", TagName: "tag1", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 100000000, time.UTC)},
+		{OrgRepoName: "someorg/repo1", TagName: "tag2", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 200000000, time.UTC)},
+		{OrgRepoName: "someorg/repo1", TagName: "tag3", ModulePath: "stash.somecompany.net/someorg/repo1", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 300000000, time.UTC)},
 	}
 
 	for _, tc := range []struct {
@@ -46,9 +46,9 @@ func TestHandleIndex(t *testing.T) {
 			tags:           fakeTags,
 			wantStatusCode: http.StatusOK,
 			wantResponse: "" +
-				`{"Path":"github.somecompany.net/someorg/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05Z"}` + "\n" +
-				`{"Path":"github.somecompany.net/someorg/repo1","Version":"tag2","Timestamp":"2025-02-03T04:05:06Z"}` + "\n" +
-				`{"Path":"stash.somecompany.net/someorg/repo1","Version":"tag3","Timestamp":"2025-03-04T05:06:07Z"}`,
+				`{"Path":"github.somecompany.net/someorg/repo1","Version":"tag1","Timestamp":"2025-01-02T03:04:05.1Z"}` + "\n" +
+				`{"Path":"github.somecompany.net/someorg/repo1","Version":"tag2","Timestamp":"2025-01-02T03:04:05.2Z"}` + "\n" +
+				`{"Path":"stash.somecompany.net/someorg/repo1","Version":"tag3","Timestamp":"2025-01-02T03:04:05.3Z"}`,
 		},
 		{
 			name:           "with invalid since query param",

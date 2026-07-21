@@ -40,7 +40,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var since time.Time
 	var err error
 	if sinceParam := r.URL.Query().Get("since"); sinceParam != "" {
-		since, err = time.Parse(time.RFC3339, sinceParam)
+		since, err = time.Parse(time.RFC3339Nano, sinceParam)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error converting 'since' param %s: %v", sinceParam, err), http.StatusBadRequest)
 			return
@@ -66,7 +66,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		out, err := json.Marshal(&module{
 			Path:      rt.ModulePath,
 			Version:   rt.TagName,
-			Timestamp: rt.IndexedAt.Format(time.RFC3339),
+			Timestamp: rt.IndexedAt.Format(time.RFC3339Nano),
 		})
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error marshalling response for %v: %v", rt, err), http.StatusInternalServerError)
