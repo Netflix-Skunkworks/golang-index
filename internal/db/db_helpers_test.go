@@ -156,10 +156,11 @@ ON CONFLICT (org_repo_name) DO NOTHING;`, rt.OrgRepoName)
 		}
 
 		query = fmt.Sprintf(`
-INSERT INTO repo_tags (org_repo_name, tag_name, module_path, created)
-VALUES ('%s', '%s', '%s', TIMESTAMP WITH TIME ZONE '%s')
+INSERT INTO repo_tags (org_repo_name, tag_name, module_path, created, indexed_at)
+VALUES ('%s', '%s', '%s', TIMESTAMP WITH TIME ZONE '%s', TIMESTAMP WITH TIME ZONE '%s')
 ON CONFLICT (org_repo_name, tag_name) DO UPDATE
-SET created = EXCLUDED.created;`, rt.OrgRepoName, rt.TagName, rt.ModulePath, rt.Created.Format(time.RFC3339))
+SET created = EXCLUDED.created, indexed_at = EXCLUDED.indexed_at;`,
+			rt.OrgRepoName, rt.TagName, rt.ModulePath, rt.Created.Format(time.RFC3339), rt.IndexedAt.Format(time.RFC3339))
 		if _, err := db.ExecContext(t.Context(), query); err != nil {
 			t.Fatalf("populateRepoTags: error inserting into repo_tags table:\nquery: %s\nerror:%v", query, err)
 		}

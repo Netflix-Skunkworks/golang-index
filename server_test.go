@@ -21,10 +21,12 @@ func (fake *fakeDB) FetchRepoTags(ctx context.Context, since time.Time, limit in
 }
 
 func TestHandleIndex(t *testing.T) {
+	// The feed emits IndexedAt, so the expected Timestamps below are the
+	// IndexedAt values.
 	fakeTags := []*db.RepoTag{
-		{OrgRepoName: "someorg/repo1", TagName: "tag1", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
-		{OrgRepoName: "someorg/repo1", TagName: "tag2", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
-		{OrgRepoName: "someorg/repo1", TagName: "tag3", ModulePath: "stash.somecompany.net/someorg/repo1", Created: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
+		{OrgRepoName: "someorg/repo1", TagName: "tag1", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)},
+		{OrgRepoName: "someorg/repo1", TagName: "tag2", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 2, 3, 4, 5, 6, 7, time.UTC)},
+		{OrgRepoName: "someorg/repo1", TagName: "tag3", ModulePath: "stash.somecompany.net/someorg/repo1", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 3, 4, 5, 6, 7, 8, time.UTC)},
 	}
 
 	for _, tc := range []struct {

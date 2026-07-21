@@ -66,7 +66,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		out, err := json.Marshal(&module{
 			Path:      rt.ModulePath,
 			Version:   rt.TagName,
-			Timestamp: rt.Created.Format(time.RFC3339),
+			Timestamp: rt.IndexedAt.Format(time.RFC3339),
 		})
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error marshalling response for %v: %v", rt, err), http.StatusInternalServerError)
