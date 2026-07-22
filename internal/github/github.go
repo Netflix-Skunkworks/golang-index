@@ -13,6 +13,7 @@ import (
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 )
 
 // githubClient wraps query interface from the shurcooL/githubv4 package so
@@ -120,11 +121,27 @@ type tagQueryEdge struct {
 	}
 }
 
-// A repo tag and its creation date.
+// A module version parsed from a repo's git tag, plus when the tag was made.
 type RepoTag struct {
-	Tag        string
+	Version    string
 	TagDate    time.Time
 	ModulePath string
+}
+
+// moduleVersionFromTag reads a git tag as a Go module version. A bare "vX.Y.Z"
+// tag is the root module; a "<subdir>/vX.Y.Z" tag is the module in <subdir> (Go
+// treats the tag prefix as the module's path under the repo root). ok is false
+// when the version isn't canonical semver, like a "v1"/"v2" pointer or a tag
+// with build metadata, which don't name a real release.
+func moduleVersionFromTag(tag string) (subdir, version string, ok bool) {
+	version = tag
+	if i := strings.LastIndex(tag, "/"); i >= 0 {
+		subdir, version = tag[:i], tag[i+1:]
+	}
+	if !semver.IsValid(version) || semver.Canonical(version) != version {
+		return "", "", false
+	}
+	return subdir, version, true
 }
 
 // Retrieves all tags for a given repo.
@@ -153,14 +170,21 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 		}
 
 		for _, t := range q.Repository.Refs.Edges {
-			var tag RepoTag
-			tag.Tag = string(t.Node.Name)
+			rawTag := string(t.Node.Name)
+			subdir, version, ok := moduleVersionFromTag(rawTag)
+			if !ok {
+				slog.Debug(fmt.Sprintf("skipping tag %q for %s: not a module version", rawTag, repo.fullName()))
+				continue
+			}
 
-			// leightweight tags point directly to commits and have
-			// `committedDate` timestamp stored on them directly. annotated
+			var tag RepoTag
+			tag.Version = version
+
+			// Lightweight tags point directly to commits and have
+			// `committedDate` timestamp stored on them directly. Annotated
 			// tags do not have a committedDate and instead store their
 			// creation timestamp in the `tag.tagger.date` field. This logic is
-			// needed so we correctly set tag date for both type of tags.
+			// needed so we correctly set tag date for both types of tags.
 			if !t.Node.Target.Commit.CommittedDate.IsZero() {
 				tag.TagDate = t.Node.Target.Commit.CommittedDate.UTC()
 			} else if !t.Node.Target.Tag.Tagger.Date.IsZero() {
@@ -168,22 +192,25 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 			}
 
 			modulePath := repo.asModulePath()
-
-			goModModulePath, found, err := scm.modulePathFromGoMod(ctx, repo, tag.Tag)
-			if err != nil {
-				// if go.mod file was found but turned out to be invalid, we want to skip the tag entirely
-				if found {
-					slog.Error(fmt.Sprintf("found go.mod file for %s but it's invalid: %v. Skipping the tag", repo.fullName(), err))
-					continue
-				}
-
-				slog.Error(fmt.Sprintf("error getting go.mod file for %s: %v. Defaulting to github url for module path", repo.fullName(), err))
+			if subdir != "" {
+				modulePath += "/" + subdir
 			}
 
-			if found {
+			goModModulePath, found, err := scm.modulePathFromGoMod(ctx, repo, rawTag, subdir)
+			switch {
+			case err != nil:
+				slog.Error(fmt.Sprintf("error getting go.mod file for %s (tag %s): %v. Defaulting to github url for module path", repo.fullName(), rawTag, err))
+			case found:
 				modulePath = goModModulePath
-			} else {
-				slog.Info(fmt.Sprintf("unable to find go.mod file in the root of the project for %s. Defaulting to github url for module path", repo.fullName()))
+			default:
+				slog.Info(fmt.Sprintf("unable to find go.mod file for %s (tag %s). Defaulting to github url for module path", repo.fullName(), rawTag))
+			}
+
+			// Skip a version whose major doesn't match its module path (say a v2+
+			// tag on a path with no /vN suffix). The real index wouldn't have it.
+			if err := module.Check(modulePath, version); err != nil {
+				slog.Debug(fmt.Sprintf("skipping tag %q for %s: %v", rawTag, repo.fullName(), err))
+				continue
 			}
 
 			tag.ModulePath = modulePath
@@ -200,16 +227,22 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 	return results, nil
 }
 
-// goModForRepo retrieves go.mod file for the repository so that we can inspect
-// its content and determine if the module path matches the repo URL or if the
-// module path is different and needs to be updated in the index. The latter
-// commonly occurs when a module has been migrated from one vcs to another
-// without changing the module path.
-func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag string) (string, bool, error) {
+// modulePathFromGoMod reads the module path declared in the go.mod at subdir
+// (the repo root when subdir is ""), at the commit the tag points to. We trust
+// that path over one built from the repo URL: it's the only place that shows a
+// /vN suffix or a vanity/moved path (e.g. a module that switched VCS host but
+// kept its old path). found is false, with a nil error, when there's no go.mod
+// or it has no module line, so the caller falls back to the repo URL.
+func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag, subdir string) (string, bool, error) {
+	goModPath := "go.mod"
+	if subdir != "" {
+		goModPath = subdir + "/go.mod"
+	}
+
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		fmt.Sprintf("%s/raw/%s/%s/%s/go.mod", scm.baseURL, repo.org, repo.name, tag),
+		fmt.Sprintf("%s/raw/%s/%s/%s/%s", scm.baseURL, repo.org, repo.name, tag, goModPath),
 		nil,
 	)
 	if err != nil {
@@ -238,19 +271,10 @@ func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag st
 		return "", false, fmt.Errorf("error reading raw github API response: %v", err)
 	}
 
-	file, err := modfile.Parse("go.mod", bodyBytes, nil)
-	if err != nil {
-		return "", false, fmt.Errorf("error parsing go.mod file for %s (tag: %s): %v", repo.fullName(), tag, err)
+	modulePath := modfile.ModulePath(bodyBytes)
+	if modulePath == "" {
+		return "", false, nil
 	}
 
-	if file.Module != nil {
-		err := module.CheckPath(file.Module.Mod.Path)
-		if err != nil {
-			return "", true, fmt.Errorf("invalid module path found for %s (tag: %s): %v", repo.fullName(), tag, err)
-		}
-
-		return file.Module.Mod.Path, true, nil
-	}
-
-	return "", false, nil
+	return modulePath, true, nil
 }

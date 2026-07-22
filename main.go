@@ -164,7 +164,7 @@ func main() {
 				for _, rt := range repoTags {
 					dbRepoTags = append(dbRepoTags, &db.RepoTag{
 						OrgRepoName: repoToReindex,
-						TagName:     rt.Tag,
+						TagName:     rt.Version,
 						ModulePath:  rt.ModulePath,
 						Created:     rt.TagDate,
 					})
