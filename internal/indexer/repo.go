@@ -1,4 +1,8 @@
-package main
+// Package indexer holds the background loops that keep the index up to date:
+// one that re-indexes the full list of Go repos, and one that re-indexes an
+// individual repo's tags. It also derives Go module versions from a repo's
+// tags, commits, and go.mod files.
+package indexer
 
 import (
 	"context"
@@ -11,7 +15,7 @@ import (
 )
 
 // scm is the source-control access needed to read a repo's module versions;
-// *github.GithubSCM satisfies it.
+// [*github.GithubSCM] satisfies it.
 type scm interface {
 	RepoTags(ctx context.Context, orgRepoName string) ([]github.Tag, error)
 	HeadCommit(ctx context.Context, orgRepoName string) (oid string, committed time.Time, err error)
@@ -20,8 +24,9 @@ type scm interface {
 
 // moduleVersionsForRepo returns a module version for each of a repo's semver
 // tags. A repo with no semver tags falls back to a single pseudo-version
-// synthesized from HEAD.
-func moduleVersionsForRepo(ctx context.Context, scm scm, orgRepoName string) ([]*mod.ModuleVersion, error) {
+// synthesized from HEAD. host is the module host used to build repo-derived
+// module paths (e.g. "github.mycompany.net").
+func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName string) ([]*mod.ModuleVersion, error) {
 	tags, err := scm.RepoTags(ctx, orgRepoName)
 	if err != nil {
 		return nil, err
@@ -31,24 +36,24 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, orgRepoName string) ([]
 	for _, t := range tags {
 		subdir, version, ok := mod.ModuleVersionFromTag(t.Name)
 		if !ok {
-			slog.Debug(fmt.Sprintf("skipping tag %q for %s: not a module version", t.Name, orgRepoName))
+			slog.Debug(fmt.Sprintf("Skipping tag %q for %s: not a module version", t.Name, orgRepoName))
 			continue
 		}
 
-		modulePath := mod.RepoModulePath(*githubHostName, orgRepoName, subdir)
+		modulePath := mod.RepoModulePath(host, orgRepoName, subdir)
 
 		goModModulePath, found, err := declaredModulePath(ctx, scm, orgRepoName, t.Name, subdir)
 		switch {
 		case err != nil:
-			slog.Error(fmt.Sprintf("error getting go.mod file for %s (tag %s): %v. Defaulting to github url for module path", orgRepoName, t.Name, err))
+			slog.Error(fmt.Sprintf("Error getting go.mod file for %s (tag %s): %v; defaulting to GitHub URL for module path", orgRepoName, t.Name, err))
 		case found:
 			modulePath = goModModulePath
 		default:
-			slog.Info(fmt.Sprintf("unable to find go.mod file for %s (tag %s). Defaulting to github url for module path", orgRepoName, t.Name))
+			slog.Info(fmt.Sprintf("Unable to find go.mod file for %s (tag %s); defaulting to GitHub URL for module path", orgRepoName, t.Name))
 		}
 
 		if err := mod.Check(modulePath, version); err != nil {
-			slog.Debug(fmt.Sprintf("skipping tag %q for %s: %v", t.Name, orgRepoName, err))
+			slog.Debug(fmt.Sprintf("Skipping tag %q for %s: %v", t.Name, orgRepoName, err))
 			continue
 		}
 
@@ -72,9 +77,9 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, orgRepoName string) ([]
 	return versions, nil
 }
 
-// headPseudoVersion builds a ModuleVersion for the root module at HEAD, used
-// when a repo has no semver tags. It returns nil when the repo has no commit, no
-// root go.mod, or a go.mod with an invalid module path.
+// headPseudoVersion builds a [mod.ModuleVersion] for the root module at HEAD,
+// used when a repo has no semver tags. It returns nil when the repo has no
+// commit, no root go.mod, or a go.mod with an invalid module path.
 func headPseudoVersion(ctx context.Context, scm scm, orgRepoName string) (*mod.ModuleVersion, error) {
 	oid, committedAt, err := scm.HeadCommit(ctx, orgRepoName)
 	if err != nil {
@@ -94,7 +99,7 @@ func headPseudoVersion(ctx context.Context, scm scm, orgRepoName string) (*mod.M
 
 	version := mod.PseudoVersion(modulePath, oid, committedAt)
 	if err := mod.Check(modulePath, version); err != nil {
-		slog.Debug(fmt.Sprintf("skipping HEAD pseudo-version for %s: %v", orgRepoName, err))
+		slog.Debug(fmt.Sprintf("Skipping HEAD pseudo-version for %s: %v", orgRepoName, err))
 		return nil, nil
 	}
 
