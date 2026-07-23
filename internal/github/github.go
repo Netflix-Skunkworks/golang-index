@@ -5,16 +5,14 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/shurcooL/githubv4"
-	"golang.org/x/mod/modfile"
-	"golang.org/x/mod/module"
-	"golang.org/x/mod/semver"
 )
+
+const queryTimeout = 10 * time.Second
 
 // githubClient wraps query interface from the shurcooL/githubv4 package so
 // that we can mock github graphql query responses in tests.
@@ -29,7 +27,8 @@ type GithubSCM struct {
 	// baseURL is where requests are sent; it may be a proxy in front of the
 	// GitHub Enterprise host, so it can differ from githubHostName.
 	baseURL string
-	// githubHostName is used for module paths and repo URLs, not for connecting.
+	// githubHostName is the GitHub Enterprise host. GoRepos strips it from repo
+	// URLs to yield "org/name"; it is not used to connect.
 	githubHostName string
 	httpClient     *http.Client
 }
@@ -74,7 +73,7 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 
 	var q repoQueryResult
 	for {
-		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
@@ -96,6 +95,7 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 	return results, nil
 }
 
+// tagQueryResponse fetches (and then holds response for) the tags for a repo.
 type tagQueryResponse struct {
 	Repository struct {
 		Refs struct {
@@ -121,36 +121,18 @@ type tagQueryEdge struct {
 	}
 }
 
-// A module version parsed from a repo's git tag, plus when the tag was made.
-type RepoTag struct {
-	Version    string
-	TagDate    time.Time
-	ModulePath string
+// Tag is one of a repo's git tags and when it was created: the commit date for
+// a lightweight tag, or the tagger date for an annotated one.
+type Tag struct {
+	Name string
+	Date time.Time
 }
 
-// moduleVersionFromTag reads a git tag as a Go module version. A bare "vX.Y.Z"
-// tag is the root module; a "<subdir>/vX.Y.Z" tag is the module in <subdir> (Go
-// treats the tag prefix as the module's path under the repo root). ok is false
-// when the version isn't canonical semver, like a "v1"/"v2" pointer or a tag
-// with build metadata, which don't name a real release.
-func moduleVersionFromTag(tag string) (subdir, version string, ok bool) {
-	version = tag
-	if i := strings.LastIndex(tag, "/"); i >= 0 {
-		subdir, version = tag[:i], tag[i+1:]
-	}
-	if !semver.IsValid(version) || semver.Canonical(version) != version {
-		return "", "", false
-	}
-	return subdir, version, true
-}
-
-// Retrieves all tags for a given repo.
-func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*RepoTag, error) {
-	var q tagQueryResponse
-
-	repo, err := newRepo(scm.githubHostName, orgRepoName)
+// RepoTags returns all of a repo's git tags, ordered newest first.
+func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) ([]Tag, error) {
+	repo, err := newRepo(orgRepoName)
 	if err != nil {
-		return nil, fmt.Errorf("TagsForRepo: %v", err)
+		return nil, fmt.Errorf("RepoTags: %v", err)
 	}
 
 	variables := map[string]any{
@@ -159,62 +141,31 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 		"tagsCursor": (*githubv4.String)(nil),
 	}
 
-	var results []*RepoTag
+	var tags []Tag
+	var q tagQueryResponse
 	// Page through all the results.
 	for {
-		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
 			return nil, fmt.Errorf("error querying tags for %s: %w", repo.fullName(), err)
 		}
 
-		for _, t := range q.Repository.Refs.Edges {
-			rawTag := string(t.Node.Name)
-			subdir, version, ok := moduleVersionFromTag(rawTag)
-			if !ok {
-				slog.Debug(fmt.Sprintf("skipping tag %q for %s: not a module version", rawTag, repo.fullName()))
-				continue
+		for _, edge := range q.Repository.Refs.Edges {
+			tag := Tag{Name: string(edge.Node.Name)}
+
+			// Lightweight tags point directly to commits and carry a
+			// `committedDate` timestamp. Annotated tags do not; they store their
+			// creation timestamp in the `tag.tagger.date` field instead. This
+			// logic sets the tag date correctly for both types of tags.
+			if !edge.Node.Target.Commit.CommittedDate.IsZero() {
+				tag.Date = edge.Node.Target.Commit.CommittedDate.UTC()
+			} else if !edge.Node.Target.Tag.Tagger.Date.IsZero() {
+				tag.Date = edge.Node.Target.Tag.Tagger.Date.UTC()
 			}
 
-			var tag RepoTag
-			tag.Version = version
-
-			// Lightweight tags point directly to commits and have
-			// `committedDate` timestamp stored on them directly. Annotated
-			// tags do not have a committedDate and instead store their
-			// creation timestamp in the `tag.tagger.date` field. This logic is
-			// needed so we correctly set tag date for both types of tags.
-			if !t.Node.Target.Commit.CommittedDate.IsZero() {
-				tag.TagDate = t.Node.Target.Commit.CommittedDate.UTC()
-			} else if !t.Node.Target.Tag.Tagger.Date.IsZero() {
-				tag.TagDate = t.Node.Target.Tag.Tagger.Date.UTC()
-			}
-
-			modulePath := repo.asModulePath()
-			if subdir != "" {
-				modulePath += "/" + subdir
-			}
-
-			goModModulePath, found, err := scm.modulePathFromGoMod(ctx, repo, rawTag, subdir)
-			switch {
-			case err != nil:
-				slog.Error(fmt.Sprintf("error getting go.mod file for %s (tag %s): %v. Defaulting to github url for module path", repo.fullName(), rawTag, err))
-			case found:
-				modulePath = goModModulePath
-			default:
-				slog.Info(fmt.Sprintf("unable to find go.mod file for %s (tag %s). Defaulting to github url for module path", repo.fullName(), rawTag))
-			}
-
-			// Skip a version whose major doesn't match its module path (say a v2+
-			// tag on a path with no /vN suffix). The real index wouldn't have it.
-			if err := module.Check(modulePath, version); err != nil {
-				slog.Debug(fmt.Sprintf("skipping tag %q for %s: %v", rawTag, repo.fullName(), err))
-				continue
-			}
-
-			tag.ModulePath = modulePath
-			results = append(results, &tag)
+			tags = append(tags, tag)
 		}
 
 		if !q.Repository.Refs.PageInfo.HasNextPage {
@@ -224,16 +175,58 @@ func (scm *GithubSCM) TagsForRepo(ctx context.Context, orgRepoName string) ([]*R
 		variables["tagsCursor"] = githubv4.NewString(q.Repository.Refs.PageInfo.EndCursor)
 	}
 
-	return results, nil
+	return tags, nil
 }
 
-// modulePathFromGoMod reads the module path declared in the go.mod at subdir
-// (the repo root when subdir is ""), at the commit the tag points to. We trust
-// that path over one built from the repo URL: it's the only place that shows a
-// /vN suffix or a vanity/moved path (e.g. a module that switched VCS host but
-// kept its old path). found is false, with a nil error, when there's no go.mod
-// or it has no module line, so the caller falls back to the repo URL.
-func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag, subdir string) (string, bool, error) {
+// headQueryResponse fetches (and then holds the response for) the default
+// branch's HEAD commit for a repo.
+type headQueryResponse struct {
+	Repository struct {
+		DefaultBranchRef struct {
+			Target struct {
+				Commit struct {
+					OID           githubv4.GitObjectID `graphql:"oid"`
+					CommittedDate githubv4.DateTime
+				} `graphql:"... on Commit"`
+			}
+		}
+	} `graphql:"repository(owner: $repoOrg, name: $repoName)"`
+}
+
+// HeadCommit returns the default branch's HEAD commit oid and commit time. The
+// oid is empty when the repo has no commits.
+func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (string, time.Time, error) {
+	repo, err := newRepo(orgRepoName)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("HeadCommit: %v", err)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var q headQueryResponse
+	variables := map[string]any{
+		"repoOrg":  githubv4.String(repo.org),
+		"repoName": githubv4.String(repo.name),
+	}
+	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
+		return "", time.Time{}, fmt.Errorf("error querying HEAD for %s: %w", repo.fullName(), err)
+	}
+
+	commit := q.Repository.DefaultBranchRef.Target.Commit
+	return string(commit.OID), commit.CommittedDate.UTC(), nil
+}
+
+// GoMod fetches the raw go.mod at subdir (the repo root when subdir is "") for
+// the given ref (a tag or commit). found is false, with a nil error, when the
+// repo has no such go.mod: that's a 404, which is common enough that we don't
+// treat it as an error or log it.
+func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string) ([]byte, bool, error) {
+	repo, err := newRepo(orgRepoName)
+	if err != nil {
+		return nil, false, fmt.Errorf("GoMod: %v", err)
+	}
+
 	goModPath := "go.mod"
 	if subdir != "" {
 		goModPath = subdir + "/go.mod"
@@ -242,39 +235,31 @@ func (scm *GithubSCM) modulePathFromGoMod(ctx context.Context, repo repo, tag, s
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		fmt.Sprintf("%s/raw/%s/%s/%s/%s", scm.baseURL, repo.org, repo.name, tag, goModPath),
+		fmt.Sprintf("%s/raw/%s/%s/%s/%s", scm.baseURL, repo.org, repo.name, ref, goModPath),
 		nil,
 	)
 	if err != nil {
-		return "", false, fmt.Errorf("error building raw github API request: %v", err)
+		return nil, false, fmt.Errorf("error building raw github API request: %v", err)
 	}
 
 	resp, err := scm.httpClient.Do(request)
 	if err != nil {
-		return "", false, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
+		return nil, false, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// we expect 404 to be returned for a lot of repos which don't have go.mod
-	// file in the root of the directory. This avoid extra noise in logs by not
-	// logging such case as an error.
 	if resp.StatusCode == 404 {
-		return "", false, nil
+		return nil, false, nil
 	}
 
 	if resp.StatusCode != 200 {
-		return "", false, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
+		return nil, false, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", false, fmt.Errorf("error reading raw github API response: %v", err)
+		return nil, false, fmt.Errorf("error reading raw github API response: %v", err)
 	}
 
-	modulePath := modfile.ModulePath(bodyBytes)
-	if modulePath == "" {
-		return "", false, nil
-	}
-
-	return modulePath, true, nil
+	return bodyBytes, true, nil
 }

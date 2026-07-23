@@ -29,6 +29,9 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 	if len(m.stubbedResults) == 0 {
 		return nil
 	}
+	if m.resultsIdx >= len(m.stubbedResults) {
+		return fmt.Errorf("mockGithubClient: query #%d has no stubbed result (%d stubbed)", m.resultsIdx+1, len(m.stubbedResults))
+	}
 
 	// GitHub GraphQL client works by populating fields of the struct q with
 	// the query response. Here, we mock that behavior by instead using the
@@ -107,9 +110,9 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}
 }
 
-func TestTagsForRepo_EmptyResponse(t *testing.T) {
+func TestRepoTags_EmptyResponse(t *testing.T) {
 	sut := NewGithubSCM(&mockGithubClient{}, "", testGithubHostname, nil)
-	got, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
+	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +121,7 @@ func TestTagsForRepo_EmptyResponse(t *testing.T) {
 	}
 }
 
-func TestTagsForRepo_MultiplePages(t *testing.T) {
+func TestRepoTags_MultiplePages(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
 	responses := []struct {
 		tags        []tagResponse
@@ -127,193 +130,136 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "v1.0.0", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
+				{tag: "v1.0.0", committedDate: date},
 				{tag: "v1.1.0", committedDate: date},
-				{tag: "v1.2.0", committedDate: date},
 			},
 			endCursor:   "somecursor",
 			hasNextPage: true,
 		},
 		{
 			tags: []tagResponse{
-				{tag: "v1.3.0", committedDate: date},
-				{tag: "v1.4.0", committedDate: date, goModContent: "module invalid/module/path"},
-				{tag: "v0.9.0", committedDate: date},
+				{tag: "v1.2.0", committedDate: date},
 			},
 		},
 	}
 
-	authToken := "test-token"
-	var tagResponses []tagResponse
-	for _, resp := range responses {
-		tagResponses = append(tagResponses, resp.tags...)
-	}
-	server := createTestGoModServer(t, authToken, tagResponses)
 	var stubbedResponses []any
 	for _, response := range responses {
 		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, response.endCursor, response.hasNextPage))
 	}
 
-	wantTags := []*RepoTag{
-		{Version: "v1.0.0", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
-		{Version: "v1.1.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
-		{Version: "v1.2.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
-		{Version: "v1.3.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
-		// v1.4.0's go.mod has a bad module path, so it's skipped.
-		{Version: "v0.9.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
-	}
-
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, testGithubHostname, TokenClient(authToken))
-	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "", testGithubHostname, nil)
+	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
-		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
+	want := []Tag{
+		{Name: "v1.0.0", Date: date},
+		{Name: "v1.1.0", Date: date},
+		{Name: "v1.2.0", Date: date},
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("RepoTags mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
-	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+func TestRepoTags_CommitAndTaggerDates(t *testing.T) {
+	committed := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	tagged := time.Date(2024, 6, 7, 8, 9, 10, 0, time.UTC)
 
-	tags := []tagResponse{
-		{tag: "v1.0.0", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
-		{tag: "v1.1.0", taggerDate: date},
-		{tag: "v1.2.0", taggerDate: date},
+	stubbed := []any{buildTagQueryResponses(t, []tagResponse{
+		{tag: "v1.0.0", committedDate: committed},
+		{tag: "v1.1.0", taggerDate: tagged},
+	}, "", false)}
+
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbed}, "", testGithubHostname, nil)
+	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	gotTags := runTagsForRepo(t, tags)
-
-	wantTags := []*RepoTag{
-		{Version: "v1.0.0", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
-		{Version: "v1.1.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
-		{Version: "v1.2.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
+	want := []Tag{
+		{Name: "v1.0.0", Date: committed},
+		{Name: "v1.1.0", Date: tagged},
 	}
 
-	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
-		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
-	}
-}
-
-func TestTagsForRepo_SubdirectoryAndNonModuleTags(t *testing.T) {
-	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
-
-	tags := []tagResponse{
-		{tag: "v1.0.0", committedDate: date},
-		{tag: "tracing/v0.2.2", committedDate: date},
-		{tag: "cmd/tool/v0.1.0", committedDate: date},
-		// Valid semver but not canonical (vN, vN.N pointers, build metadata): skipped.
-		{tag: "v1", committedDate: date},
-		{tag: "v2", committedDate: date},
-		{tag: "v1.2", committedDate: date},
-		{tag: "tracing/v2", committedDate: date},
-		{tag: "v1.0.0+incompatible", committedDate: date},
-		// Not semver at all: skipped.
-		{tag: "_gheMigrationPR-435", committedDate: date},
-		{tag: "docs/latest", committedDate: date},
-		{tag: "slides/2", committedDate: date},
-	}
-
-	gotTags := runTagsForRepo(t, tags)
-
-	wantTags := []*RepoTag{
-		{Version: "v1.0.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
-		{Version: "v0.2.2", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1/tracing"},
-		{Version: "v0.1.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1/cmd/tool"},
-	}
-
-	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
-		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("RepoTags mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestTagsForRepo_SubdirectoryModuleGoMod(t *testing.T) {
-	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+func TestHeadCommit(t *testing.T) {
+	commitDate := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	const oid = "abcdef0123456789abcdef0123456789abcdef01"
 
-	tags := []tagResponse{
-		// Subdir module at v2+: keep the /v2 from its go.mod.
-		{tag: "tracing/v2.0.0", committedDate: date, goModContent: "module go.example.com/monorepo/tracing/v2\n"},
-		// go.mod declares a vanity/moved path: use it as-is.
-		{tag: "auth/v1.4.0", committedDate: date, goModContent: "module vanity.example.com/auth\n"},
-		// No go.mod: fall back to the path from the repo URL.
-		{tag: "metrics/v0.5.0", committedDate: date},
-	}
-
-	gotTags := runTagsForRepo(t, tags)
-
-	wantTags := []*RepoTag{
-		{Version: "v2.0.0", TagDate: date, ModulePath: "go.example.com/monorepo/tracing/v2"},
-		{Version: "v1.4.0", TagDate: date, ModulePath: "vanity.example.com/auth"},
-		{Version: "v0.5.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1/metrics"},
-	}
-
-	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
-		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
-	}
-}
-
-func TestTagsForRepo_SkipsMajorVersionMismatch(t *testing.T) {
-	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
-
-	tags := []tagResponse{
-		// Root v2+ with no go.mod: path has no /v2 suffix, so skip it.
-		{tag: "v2.0.0", committedDate: date},
-		// Root v2+ but the go.mod path is v0/v1, so skip it.
-		{tag: "v2.1.0", committedDate: date, goModContent: "module vanity.example.com/thing\n"},
-		// Subdir v3 tag but the go.mod is /v2, so skip it.
-		{tag: "tracing/v3.0.0", committedDate: date, goModContent: "module go.example.com/monorepo/tracing/v2\n"},
-		// A plain v1 tag still comes through.
-		{tag: "v1.5.0", committedDate: date},
-	}
-
-	gotTags := runTagsForRepo(t, tags)
-
-	wantTags := []*RepoTag{
-		{Version: "v1.5.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
-	}
-
-	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
-		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
-	}
-}
-
-func TestModuleVersionFromTag(t *testing.T) {
-	type result struct {
-		subdir  string
-		version string
-		ok      bool
-	}
 	tests := []struct {
-		name string
-		tag  string
-		want result
+		name          string
+		response      headQueryResponse
+		wantOID       string
+		wantCommitted time.Time
 	}{
-		{name: "root version", tag: "v1.0.0", want: result{version: "v1.0.0", ok: true}},
-		{name: "root prerelease", tag: "v1.0.0-rc.1", want: result{version: "v1.0.0-rc.1", ok: true}},
-		{name: "root major version 2", tag: "v2.3.4", want: result{version: "v2.3.4", ok: true}},
-		{name: "subdir version", tag: "tracing/v0.2.2", want: result{subdir: "tracing", version: "v0.2.2", ok: true}},
-		{name: "nested subdir version", tag: "cmd/tool/v0.1.0", want: result{subdir: "cmd/tool", version: "v0.1.0", ok: true}},
-		{name: "major-only pointer", tag: "v1", want: result{}},
-		{name: "major-only pointer v2", tag: "v2", want: result{}},
-		{name: "minor-only pointer", tag: "v1.2", want: result{}},
-		{name: "subdir major-only pointer", tag: "tracing/v2", want: result{}},
-		{name: "build metadata", tag: "v1.0.0+incompatible", want: result{}},
-		{name: "missing v prefix", tag: "1.0.0", want: result{}},
-		{name: "not a version", tag: "_gheMigrationPR-435", want: result{}},
-		{name: "subdir non-version", tag: "docs/latest", want: result{}},
-		{name: "bare number", tag: "slides/2", want: result{}},
+		{
+			name:          "has commit",
+			response:      buildHeadQueryResponse(oid, commitDate),
+			wantOID:       oid,
+			wantCommitted: commitDate,
+		},
+		{
+			name:     "empty repo has no commit",
+			response: buildHeadQueryResponse("", time.Time{}),
+			wantOID:  "",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			subdir, version, ok := moduleVersionFromTag(tc.tag)
-			got := result{subdir: subdir, version: version, ok: ok}
-			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(result{})); diff != "" {
-				t.Errorf("moduleVersionFromTag(%q) mismatch (-want +got):\n%s", tc.tag, diff)
+			sut := NewGithubSCM(&mockGithubClient{stubbedResults: []any{tc.response}}, "", testGithubHostname, nil)
+
+			gotOID, gotCommitted, err := sut.HeadCommit(t.Context(), "someorg/repo1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotOID != tc.wantOID {
+				t.Errorf("HeadCommit(%q) oid = %q, want %q", "someorg/repo1", gotOID, tc.wantOID)
+			}
+			if !gotCommitted.Equal(tc.wantCommitted) {
+				t.Errorf("HeadCommit(%q) committedAt = %v, want %v", "someorg/repo1", gotCommitted, tc.wantCommitted)
 			}
 		})
 	}
+}
+
+func TestGoMod(t *testing.T) {
+	const authToken = "test-token"
+	const goMod = "module go.example.com/thing\n"
+
+	server := createTestGoModServer(t, authToken, []tagResponse{{tag: "v1.0.0", goModContent: goMod}})
+	sut := NewGithubSCM(nil, server.URL, testGithubHostname, TokenClient(authToken))
+
+	t.Run("found", func(t *testing.T) {
+		content, found, err := sut.GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			t.Fatal("expected go.mod to be found")
+		}
+		if got := string(content); got != goMod {
+			t.Errorf("GoMod content = %q, want %q", got, goMod)
+		}
+	})
+
+	t.Run("missing is not an error", func(t *testing.T) {
+		_, found, err := sut.GoMod(t.Context(), "someorg/repo1", "v9.9.9", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found {
+			t.Error("expected missing go.mod to report found=false")
+		}
+	})
 }
 
 func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.String, hasNextPage bool) repoQueryResult {
@@ -371,23 +317,15 @@ func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4
 	return q
 }
 
-// runTagsForRepo runs TagsForRepo against a test go.mod server built from a
-// single page of tags. The server's host:port is the baseURL we send requests
-// to; the module host is testGithubHostname. They differ on purpose, like in
-// production where baseURL is often a proxy in front of the real GHE host.
-func runTagsForRepo(t *testing.T, tags []tagResponse) []*RepoTag {
-	t.Helper()
-
-	const authToken = "test-token"
-	server := createTestGoModServer(t, authToken, tags)
-	stubbedResponses := []any{buildTagQueryResponses(t, tags, "", false)}
-
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, testGithubHostname, TokenClient(authToken))
-	got, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
-	if err != nil {
-		t.Fatal(err)
+// buildHeadQueryResponse stubs the default branch's HEAD commit. A zero-value
+// oid stands in for an empty repo with no default branch.
+func buildHeadQueryResponse(oid string, committedDate time.Time) headQueryResponse {
+	var q headQueryResponse
+	q.Repository.DefaultBranchRef.Target.Commit.OID = githubv4.GitObjectID(oid)
+	if !committedDate.IsZero() {
+		q.Repository.DefaultBranchRef.Target.Commit.CommittedDate = *githubv4.NewDateTime(githubv4.DateTime{Time: committedDate})
 	}
-	return got
+	return q
 }
 
 func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) *httptest.Server {
@@ -421,7 +359,7 @@ func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) *
 
 // goModRequestPath is the "<ref>/<path>" part of the go.mod URL for a tag: the
 // root go.mod at "<tag>/go.mod", or the subdir go.mod at "<tag>/<subdir>/go.mod"
-// for a "<subdir>/vX.Y.Z" tag. It matches the URL modulePathFromGoMod builds.
+// for a "<subdir>/vX.Y.Z" tag. It matches the URL GoMod builds.
 func goModRequestPath(tag string) string {
 	if i := strings.LastIndex(tag, "/"); i >= 0 {
 		return tag + "/" + tag[:i] + "/go.mod"
