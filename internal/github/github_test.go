@@ -127,18 +127,18 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 	}{
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
-				{tag: "_gheMigrationPR-436", committedDate: date},
-				{tag: "_gheMigrationPR-437", committedDate: date},
+				{tag: "v1.0.0", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
+				{tag: "v1.1.0", committedDate: date},
+				{tag: "v1.2.0", committedDate: date},
 			},
 			endCursor:   "somecursor",
 			hasNextPage: true,
 		},
 		{
 			tags: []tagResponse{
-				{tag: "_gheMigrationPR-438", committedDate: date},
-				{tag: "_gheMigrationPR-439", committedDate: date, goModContent: "module invalid/module/path"},
-				{tag: "_gheMigrationPR-430", committedDate: date},
+				{tag: "v1.3.0", committedDate: date},
+				{tag: "v1.4.0", committedDate: date, goModContent: "module invalid/module/path"},
+				{tag: "v0.9.0", committedDate: date},
 			},
 		},
 	}
@@ -148,76 +148,171 @@ func TestTagsForRepo_MultiplePages(t *testing.T) {
 	for _, resp := range responses {
 		tagResponses = append(tagResponses, resp.tags...)
 	}
-	server, hostPort := createTestGoModServer(t, authToken, tagResponses)
-	defer server.Close()
-
+	server := createTestGoModServer(t, authToken, tagResponses)
 	var stubbedResponses []any
 	for _, response := range responses {
 		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, response.endCursor, response.hasNextPage))
 	}
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
-		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
-		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
-		{Tag: "_gheMigrationPR-438", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
-		// {Tag: "_gheMigrationPR-439"}:  tags with invalid go.mod content are skipped entirely.
-		{Tag: "_gheMigrationPR-430", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
+		{Version: "v1.0.0", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		{Version: "v1.1.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
+		{Version: "v1.2.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
+		{Version: "v1.3.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
+		// v1.4.0's go.mod has a bad module path, so it's skipped.
+		{Version: "v0.9.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, hostPort, TokenClient(authToken))
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, testGithubHostname, TokenClient(authToken))
 	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
-		t.Errorf("unexpected tags: -want, +got: %s", diff)
+		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
 	}
 }
 
 func TestTagsForRepo_HandlesCommitsAndAnnotatedTags(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
 
-	responses := []struct {
-		tags []tagResponse
-	}{
-		{
-			tags: []tagResponse{
-				{tag: "_gheMigrationPR-435", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
-				{tag: "_gheMigrationPR-436", taggerDate: date},
-				{tag: "_gheMigrationPR-437", taggerDate: date},
-			},
-		},
+	tags := []tagResponse{
+		{tag: "v1.0.0", committedDate: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
+		{tag: "v1.1.0", taggerDate: date},
+		{tag: "v1.2.0", taggerDate: date},
 	}
 
-	authToken := "test-token"
-	var tagResponses []tagResponse
-	for _, resp := range responses {
-		tagResponses = append(tagResponses, resp.tags...)
-	}
-	server, hostPort := createTestGoModServer(t, authToken, tagResponses)
-	defer server.Close()
-
-	var stubbedResponses []any
-	for _, response := range responses {
-		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, "", false))
-	}
+	gotTags := runTagsForRepo(t, tags)
 
 	wantTags := []*RepoTag{
-		{Tag: "_gheMigrationPR-435", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
-		{Tag: "_gheMigrationPR-436", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
-		{Tag: "_gheMigrationPR-437", TagDate: date, ModulePath: hostPort + "/someorg/repo1"},
-	}
-
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, hostPort, TokenClient(authToken))
-	gotTags, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
-	if err != nil {
-		t.Fatal(err)
+		{Version: "v1.0.0", TagDate: date, ModulePath: "stash.someorg.company.com/someorg/repo1"},
+		{Version: "v1.1.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
+		{Version: "v1.2.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
 	}
 
 	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
-		t.Errorf("unexpected tags: -want, +got: %s", diff)
+		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
+	}
+}
+
+func TestTagsForRepo_SubdirectoryAndNonModuleTags(t *testing.T) {
+	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+
+	tags := []tagResponse{
+		{tag: "v1.0.0", committedDate: date},
+		{tag: "tracing/v0.2.2", committedDate: date},
+		{tag: "cmd/tool/v0.1.0", committedDate: date},
+		// Valid semver but not canonical (vN, vN.N pointers, build metadata): skipped.
+		{tag: "v1", committedDate: date},
+		{tag: "v2", committedDate: date},
+		{tag: "v1.2", committedDate: date},
+		{tag: "tracing/v2", committedDate: date},
+		{tag: "v1.0.0+incompatible", committedDate: date},
+		// Not semver at all: skipped.
+		{tag: "_gheMigrationPR-435", committedDate: date},
+		{tag: "docs/latest", committedDate: date},
+		{tag: "slides/2", committedDate: date},
+	}
+
+	gotTags := runTagsForRepo(t, tags)
+
+	wantTags := []*RepoTag{
+		{Version: "v1.0.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
+		{Version: "v0.2.2", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1/tracing"},
+		{Version: "v0.1.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1/cmd/tool"},
+	}
+
+	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
+		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
+	}
+}
+
+func TestTagsForRepo_SubdirectoryModuleGoMod(t *testing.T) {
+	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+
+	tags := []tagResponse{
+		// Subdir module at v2+: keep the /v2 from its go.mod.
+		{tag: "tracing/v2.0.0", committedDate: date, goModContent: "module go.example.com/monorepo/tracing/v2\n"},
+		// go.mod declares a vanity/moved path: use it as-is.
+		{tag: "auth/v1.4.0", committedDate: date, goModContent: "module vanity.example.com/auth\n"},
+		// No go.mod: fall back to the path from the repo URL.
+		{tag: "metrics/v0.5.0", committedDate: date},
+	}
+
+	gotTags := runTagsForRepo(t, tags)
+
+	wantTags := []*RepoTag{
+		{Version: "v2.0.0", TagDate: date, ModulePath: "go.example.com/monorepo/tracing/v2"},
+		{Version: "v1.4.0", TagDate: date, ModulePath: "vanity.example.com/auth"},
+		{Version: "v0.5.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1/metrics"},
+	}
+
+	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
+		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
+	}
+}
+
+func TestTagsForRepo_SkipsMajorVersionMismatch(t *testing.T) {
+	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+
+	tags := []tagResponse{
+		// Root v2+ with no go.mod: path has no /v2 suffix, so skip it.
+		{tag: "v2.0.0", committedDate: date},
+		// Root v2+ but the go.mod path is v0/v1, so skip it.
+		{tag: "v2.1.0", committedDate: date, goModContent: "module vanity.example.com/thing\n"},
+		// Subdir v3 tag but the go.mod is /v2, so skip it.
+		{tag: "tracing/v3.0.0", committedDate: date, goModContent: "module go.example.com/monorepo/tracing/v2\n"},
+		// A plain v1 tag still comes through.
+		{tag: "v1.5.0", committedDate: date},
+	}
+
+	gotTags := runTagsForRepo(t, tags)
+
+	wantTags := []*RepoTag{
+		{Version: "v1.5.0", TagDate: date, ModulePath: testGithubHostname + "/someorg/repo1"},
+	}
+
+	if diff := cmp.Diff(wantTags, gotTags); diff != "" {
+		t.Errorf("TagsForRepo(%q) mismatch (-want +got):\n%s", "someorg/repo1", diff)
+	}
+}
+
+func TestModuleVersionFromTag(t *testing.T) {
+	type result struct {
+		subdir  string
+		version string
+		ok      bool
+	}
+	tests := []struct {
+		name string
+		tag  string
+		want result
+	}{
+		{name: "root version", tag: "v1.0.0", want: result{version: "v1.0.0", ok: true}},
+		{name: "root prerelease", tag: "v1.0.0-rc.1", want: result{version: "v1.0.0-rc.1", ok: true}},
+		{name: "root major version 2", tag: "v2.3.4", want: result{version: "v2.3.4", ok: true}},
+		{name: "subdir version", tag: "tracing/v0.2.2", want: result{subdir: "tracing", version: "v0.2.2", ok: true}},
+		{name: "nested subdir version", tag: "cmd/tool/v0.1.0", want: result{subdir: "cmd/tool", version: "v0.1.0", ok: true}},
+		{name: "major-only pointer", tag: "v1", want: result{}},
+		{name: "major-only pointer v2", tag: "v2", want: result{}},
+		{name: "minor-only pointer", tag: "v1.2", want: result{}},
+		{name: "subdir major-only pointer", tag: "tracing/v2", want: result{}},
+		{name: "build metadata", tag: "v1.0.0+incompatible", want: result{}},
+		{name: "missing v prefix", tag: "1.0.0", want: result{}},
+		{name: "not a version", tag: "_gheMigrationPR-435", want: result{}},
+		{name: "subdir non-version", tag: "docs/latest", want: result{}},
+		{name: "bare number", tag: "slides/2", want: result{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			subdir, version, ok := moduleVersionFromTag(tc.tag)
+			got := result{subdir: subdir, version: version, ok: ok}
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(result{})); diff != "" {
+				t.Errorf("moduleVersionFromTag(%q) mismatch (-want +got):\n%s", tc.tag, diff)
+			}
+		})
 	}
 }
 
@@ -276,7 +371,26 @@ func buildTagQueryResponses(t *testing.T, tags []tagResponse, endCursor githubv4
 	return q
 }
 
-func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) (*httptest.Server, string) {
+// runTagsForRepo runs TagsForRepo against a test go.mod server built from a
+// single page of tags. The server's host:port is the baseURL we send requests
+// to; the module host is testGithubHostname. They differ on purpose, like in
+// production where baseURL is often a proxy in front of the real GHE host.
+func runTagsForRepo(t *testing.T, tags []tagResponse) []*RepoTag {
+	t.Helper()
+
+	const authToken = "test-token"
+	server := createTestGoModServer(t, authToken, tags)
+	stubbedResponses := []any{buildTagQueryResponses(t, tags, "", false)}
+
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, server.URL, testGithubHostname, TokenClient(authToken))
+	got, err := sut.TagsForRepo(t.Context(), "someorg/repo1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) *httptest.Server {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -285,17 +399,14 @@ func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) (
 			return
 		}
 
-		urlParts := strings.Split(r.URL.String(), "/")
-		if len(urlParts) < 2 {
-			http.Error(w, fmt.Sprintf("unexpected url format: %s", r.URL.String()), http.StatusBadRequest)
-			return
-		}
-		wantTag := urlParts[len(urlParts)-2]
-
 		for _, tag := range tags {
-			if tag.tag == wantTag && tag.goModContent != "" {
+			if tag.goModContent == "" {
+				continue
+			}
+			if strings.HasSuffix(r.URL.Path, "/"+goModRequestPath(tag.tag)) {
 				if _, err := w.Write([]byte(tag.goModContent)); err != nil {
-					t.Fatal(err)
+					// Can't call t.Fatal off the test goroutine, so use Errorf.
+					t.Errorf("writing go.mod for %q: %v", tag.tag, err)
 				}
 				return
 			}
@@ -303,6 +414,17 @@ func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) (
 
 		http.NotFound(w, r)
 	}))
+	t.Cleanup(server.Close)
 
-	return server, strings.TrimPrefix(server.URL, "http://")
+	return server
+}
+
+// goModRequestPath is the "<ref>/<path>" part of the go.mod URL for a tag: the
+// root go.mod at "<tag>/go.mod", or the subdir go.mod at "<tag>/<subdir>/go.mod"
+// for a "<subdir>/vX.Y.Z" tag. It matches the URL modulePathFromGoMod builds.
+func goModRequestPath(tag string) string {
+	if i := strings.LastIndex(tag, "/"); i >= 0 {
+		return tag + "/" + tag[:i] + "/go.mod"
+	}
+	return tag + "/go.mod"
 }
