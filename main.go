@@ -146,7 +146,7 @@ func main() {
 					continue
 				}
 				logger.Info(fmt.Sprintf("repo tags re-indexing: got work for repo %s", repoToReindex))
-				repoTags, err := githubSCM.TagsForRepo(grpCtx, repoToReindex)
+				moduleVersions, err := moduleVersionsForRepo(grpCtx, githubSCM, repoToReindex)
 				if err != nil {
 					// TODO(jbarkhuysen): Add some metrics/alerting here.
 					slog.Error(fmt.Sprintf("erroring fetching all repo tags: %v", err))
@@ -157,23 +157,23 @@ func main() {
 						return grpCtx.Err()
 					}
 				}
-				if len(repoTags) == 0 {
+				if len(moduleVersions) == 0 {
 					continue
 				}
 				var dbRepoTags []*db.RepoTag
-				for _, rt := range repoTags {
+				for _, mv := range moduleVersions {
 					dbRepoTags = append(dbRepoTags, &db.RepoTag{
 						OrgRepoName: repoToReindex,
-						TagName:     rt.Version,
-						ModulePath:  rt.ModulePath,
-						Created:     rt.TagDate,
+						TagName:     mv.Version,
+						ModulePath:  mv.ModulePath,
+						Created:     mv.Created,
 					})
 				}
-				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d tags... storing results", repoToReindex, len(repoTags)))
+				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d module versions... storing results", repoToReindex, len(moduleVersions)))
 				if err := idb.StoreRepoTags(grpCtx, dbRepoTags); err != nil {
 					return fmt.Errorf("error storing repo tags: %v", err)
 				}
-				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d tags... done", repoToReindex, len(repoTags)))
+				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d module versions... done", repoToReindex, len(moduleVersions)))
 
 				// Eagerly check for new work rather than waiting again.
 			}
