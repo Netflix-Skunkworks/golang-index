@@ -5,16 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/Netflix-Skunkworks/golang-index/internal"
 	"github.com/Netflix-Skunkworks/golang-index/internal/db"
 	"github.com/Netflix-Skunkworks/golang-index/internal/github"
+	"github.com/Netflix-Skunkworks/golang-index/internal/indexer"
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/sync/errgroup"
 )
@@ -76,108 +75,28 @@ func main() {
 
 	server := newServer(*port, idb, *githubHostName)
 
-	// Backoff for GitHub issues.
-	githubBackoff := &internal.Backoff{
-		Initial:    30 * time.Second,
-		Multiplier: 1.5,
-		Max:        5 * time.Minute,
-	}
-
 	grp, grpCtx := errgroup.WithContext(ctx)
 
-	// TODO(jbarkhuysen): This should probably be in a function that's tested.
-	grp.Go(func() error {
-		// Periodically re-index all repos.
-		for {
-			shouldReindex, err := idb.NextReindexAllReposWork(grpCtx, *allReposReindexTTL, *allReposReindexPeriod)
-			if err != nil {
-				return fmt.Errorf("error fetching next reindex all repos work: %v", err)
-			}
-			if shouldReindex {
-				slog.Info("should re-index all Go repos: yes")
-				allRepos, err := githubSCM.GoRepos(grpCtx)
-				if err != nil {
-					// TODO(jbarkhuysen): Add some metrics/alerting here.
-					slog.Error(fmt.Sprintf("error fetching all Go repos: %v", err))
-					select {
-					case <-time.After(githubBackoff.Pause()):
-						continue
-					case <-grpCtx.Done():
-						return grpCtx.Err()
-					}
-				}
-				if err := idb.StoreRepos(ctx, allRepos); err != nil {
-					return fmt.Errorf("error storing all repos: %v", err)
-				}
-				slog.Info(fmt.Sprintf("finished re-indexing all Go repos. saw %d repos", len(allRepos)))
-			} else {
-				slog.Info(fmt.Sprintf("should re-index all Go repos: no. waiting %v to check again", *allReposReindexWorkCheckPeriod))
-			}
+	allReposIndexer := &indexer.AllReposIndexer{
+		DB:              idb,
+		Lister:          githubSCM,
+		WorkCheckPeriod: *allReposReindexWorkCheckPeriod,
+		ReindexTTL:      *allReposReindexTTL,
+		ReindexPeriod:   *allReposReindexPeriod,
+	}
+	grp.Go(func() error { return allReposIndexer.Run(grpCtx) })
 
-			// No point in eagerly checking for new work: there's only one work
-			// item and we just worked on it.
-			select {
-			case <-time.After(*allReposReindexWorkCheckPeriod):
-			case <-grpCtx.Done():
-				return grpCtx.Err()
-			}
-		}
-	})
 	for workerID := range *repoTagsReindexingWorkers {
-		// TODO(jbarkhuysen): This should probably be in a function that's tested.
-		grp.Go(func() error {
-			// Periodically re-index a repo's tags.
-			logger := slog.With("workerID", workerID)
-			for {
-				repoToReindex, gotWork, err := idb.NextReindexRepoTagsWork(grpCtx, *repoTagsReindexTTL, *repoTagsReindexPeriod)
-				if err != nil {
-					return fmt.Errorf("error fetching next reindex repo tags work: %v", err)
-				}
-				if !gotWork {
-					// Wait with (1s-60s) jitter and check again.
-					jitter := time.Duration((rand.Intn(60) + 1) * 1e9)
-					waitTime := *repoTagsReindexingWorkCheckPeriod + jitter
-					logger.Info(fmt.Sprintf("repo tags re-indexing: no work, waiting %v to check again", waitTime))
-					select {
-					case <-time.After(waitTime):
-					case <-grpCtx.Done():
-						return grpCtx.Err()
-					}
-					continue
-				}
-				logger.Info(fmt.Sprintf("repo tags re-indexing: got work for repo %s", repoToReindex))
-				moduleVersions, err := moduleVersionsForRepo(grpCtx, githubSCM, repoToReindex)
-				if err != nil {
-					// TODO(jbarkhuysen): Add some metrics/alerting here.
-					slog.Error(fmt.Sprintf("erroring fetching all repo tags: %v", err))
-					select {
-					case <-time.After(githubBackoff.Pause()):
-						continue
-					case <-grpCtx.Done():
-						return grpCtx.Err()
-					}
-				}
-				if len(moduleVersions) == 0 {
-					continue
-				}
-				var dbRepoTags []*db.RepoTag
-				for _, mv := range moduleVersions {
-					dbRepoTags = append(dbRepoTags, &db.RepoTag{
-						OrgRepoName: repoToReindex,
-						TagName:     mv.Version,
-						ModulePath:  mv.ModulePath,
-						Created:     mv.Created,
-					})
-				}
-				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d module versions... storing results", repoToReindex, len(moduleVersions)))
-				if err := idb.StoreRepoTags(grpCtx, dbRepoTags); err != nil {
-					return fmt.Errorf("error storing repo tags: %v", err)
-				}
-				logger.Info(fmt.Sprintf("repo tags re-indexing: finished re-indexing repo %s, got %d module versions... done", repoToReindex, len(moduleVersions)))
-
-				// Eagerly check for new work rather than waiting again.
-			}
-		})
+		repoTagsIndexer := &indexer.RepoTagsIndexer{
+			DB:                idb,
+			SCM:               githubSCM,
+			DefaultModuleHost: *githubHostName,
+			WorkerID:          workerID,
+			WorkCheckPeriod:   *repoTagsReindexingWorkCheckPeriod,
+			ReindexTTL:        *repoTagsReindexTTL,
+			ReindexPeriod:     *repoTagsReindexPeriod,
+		}
+		grp.Go(func() error { return repoTagsIndexer.Run(grpCtx) })
 	}
 	go func() {
 		// TODO(jbarkhuysen): Split out the http.Handler and then put this in a grp.Go.

@@ -22,7 +22,7 @@ func TokenClient(token string) *http.Client {
 func MTLSClient(certFile, keyFile, caFile string) (*http.Client, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("loading client certificate: %w", err)
+		return nil, fmt.Errorf("loading client certificate: %v", err)
 	}
 	slog.Info("loaded github client certificate", "expiry", cert.Leaf.NotAfter)
 
@@ -44,7 +44,7 @@ func MTLSClient(certFile, keyFile, caFile string) (*http.Client, error) {
 		// A CA bundle was given: verify the server against it.
 		caPEM, err := os.ReadFile(caFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading CA certificate: %w", err)
+			return nil, fmt.Errorf("reading CA certificate: %v", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {

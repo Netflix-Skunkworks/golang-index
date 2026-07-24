@@ -77,7 +77,7 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 		defer cancel()
 
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-			return nil, fmt.Errorf("error querying repositories: %w", err)
+			return nil, fmt.Errorf("error querying repositories: %v", err)
 		}
 
 		for _, edge := range q.Search.Edges {
@@ -149,7 +149,7 @@ func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) ([]Tag, 
 		defer cancel()
 
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-			return nil, fmt.Errorf("error querying tags for %s: %w", repo.fullName(), err)
+			return nil, fmt.Errorf("error querying tags for %s: %v", repo.fullName(), err)
 		}
 
 		for _, edge := range q.Repository.Refs.Edges {
@@ -210,7 +210,7 @@ func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (strin
 		"repoName": githubv4.String(repo.name),
 	}
 	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-		return "", time.Time{}, fmt.Errorf("error querying HEAD for %s: %w", repo.fullName(), err)
+		return "", time.Time{}, fmt.Errorf("error querying HEAD for %s: %v", repo.fullName(), err)
 	}
 
 	commit := q.Repository.DefaultBranchRef.Target.Commit

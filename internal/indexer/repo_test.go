@@ -1,7 +1,6 @@
-package main
+package indexer
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -11,32 +10,6 @@ import (
 )
 
 const testModuleHost = "github.somecompany.net"
-
-// fakeSCM is an in-memory scm: it serves canned tags, HEAD, and go.mod files
-// without talking to GitHub.
-type fakeSCM struct {
-	tags    []github.Tag
-	headOID string
-	headAt  time.Time
-	// goMods maps a ref (a tag name or commit oid) to its go.mod contents. A ref
-	// that's absent has no go.mod.
-	goMods map[string]string
-}
-
-func (f *fakeSCM) RepoTags(context.Context, string) ([]github.Tag, error) {
-	return f.tags, nil
-}
-
-func (f *fakeSCM) HeadCommit(context.Context, string) (string, time.Time, error) {
-	return f.headOID, f.headAt, nil
-}
-
-func (f *fakeSCM) GoMod(_ context.Context, _, ref, _ string) ([]byte, bool, error) {
-	if content, ok := f.goMods[ref]; ok {
-		return []byte(content), true, nil
-	}
-	return nil, false, nil
-}
 
 type tagSpec struct {
 	tag          string
@@ -58,10 +31,9 @@ func fakeFromTags(specs []tagSpec) *fakeSCM {
 func versionsForRepo(t *testing.T, scm scm) []*mod.ModuleVersion {
 	t.Helper()
 
-	*githubHostName = testModuleHost
-	got, err := moduleVersionsForRepo(t.Context(), scm, "someorg/repo1")
+	got, err := moduleVersionsForRepo(t.Context(), scm, testModuleHost, "someorg/repo1")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("moduleVersionsForRepo(%q) returned error: %v", "someorg/repo1", err)
 	}
 	return got
 }
@@ -69,7 +41,7 @@ func versionsForRepo(t *testing.T, scm scm) []*mod.ModuleVersion {
 func TestModuleVersionsForRepo_Empty(t *testing.T) {
 	got := versionsForRepo(t, &fakeSCM{})
 	if len(got) != 0 {
-		t.Errorf("expected no versions, but got %d results", len(got))
+		t.Errorf("moduleVersionsForRepo() = %d versions, want 0", len(got))
 	}
 }
 
