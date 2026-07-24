@@ -5,7 +5,7 @@ More detailed information about the response formats and other details can be fo
 
 ## Standing up postgres
 
-Running the binary & tests requires standing up postgres:
+Running the binary requires standing up postgres (tests do not — see below):
 
 ```sh
 export POSTGRES_USERNAME=postgres
@@ -45,15 +45,15 @@ go run . \
 
 ## Running tests
 
-Running tests requires a running Postgres, with migrations run, and providing
-environment variables as follows:
+Tests need no setup. They start an ephemeral embedded Postgres — a real Postgres
+binary, downloaded and cached on first run (no Docker, no standing database) —
+and apply the migrations automatically.
 
 ```sh
-# Stand up postgres.
-go test ./... -v # Note: tests run migrations automatically.
+go test ./...
 ```
 
-Connect to psql for debugging:
+To connect to the app's postgres (see above) with psql for debugging:
 
 ```sh
 PGPASSWORD=$POSTGRES_PASSWORD psql -h $POSTGRES_HOST -p $POSTGRES_PORT -d index -U $POSTGRES_USERNAME

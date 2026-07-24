@@ -13,9 +13,10 @@ import (
 
 func TestFetchRepoTags(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 
-	now := time.Now()
+	// UTC because indexed_at is stored and compared in UTC, matching the real
+	// /index feed's RFC3339-UTC ?since= values (see StoreRepoTags' timezone note).
+	now := time.Now().UTC()
 	// Ordered by IndexedAt ASC, as FetchRepoTags returns. The out-of-order Created
 	// dates ensure the ordering can only come from IndexedAt.
 	allTags := []*db.RepoTag{
@@ -55,7 +56,6 @@ func TestFetchRepoTags(t *testing.T) {
 
 func TestStoreRepos(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 
 	if err := sutDB.StoreRepos(t.Context(), []string{"foo/bar", "gaz/urk"}); err != nil {
 		t.Fatal(err)
@@ -81,7 +81,6 @@ func TestStoreRepoTags(t *testing.T) {
 	// Whenever we store tags for a repo, all pre-existing tags are removed.
 	// Only new tags remain.
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 
 	if err := sutDB.StoreRepos(t.Context(), []string{"foo/bar", "foo/gaz"}); err != nil {
 		t.Fatal(err)
@@ -104,6 +103,35 @@ func TestStoreRepoTags(t *testing.T) {
 	}
 	gotRepoTags := repoTags(t, sqlDB)
 	if diff := cmp.Diff(want, gotRepoTags, cmpopts.EquateApproxTime(time.Second)); diff != "" {
+		t.Errorf("StoreRepoTags: -want,+got: %s", diff)
+	}
+}
+
+func TestStoreRepoTags_CollidingModuleVersions(t *testing.T) {
+	// A repo with no semver tags gets one HEAD pseudo-version per module. Because a
+	// pseudo-version is derived from the commit, not the module path, sibling v0
+	// modules share an identical version string. They must coexist, keyed by
+	// module_path; a single-batch insert that keyed only on (repo, tag) crashed
+	// here with "ON CONFLICT DO UPDATE command cannot affect row a second time".
+	sutDB, sqlDB := setupDB(t)
+
+	if err := sutDB.StoreRepos(t.Context(), []string{"foo/multi"}); err != nil {
+		t.Fatal(err)
+	}
+
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	const pseudo = "v0.0.0-20260102030405-abcdef012345"
+	tags := []*db.RepoTag{
+		{OrgRepoName: "foo/multi", TagName: pseudo, ModulePath: "github.somecompany.net/foo/multi", Created: created},
+		{OrgRepoName: "foo/multi", TagName: pseudo, ModulePath: "github.somecompany.net/foo/multi/cmd/tool", Created: created},
+	}
+	if err := sutDB.StoreRepoTags(t.Context(), tags); err != nil {
+		t.Fatalf("StoreRepoTags with colliding pseudo-versions: %v", err)
+	}
+
+	byModulePath := cmpopts.SortSlices(func(a, b *db.RepoTag) bool { return a.ModulePath < b.ModulePath })
+	want := map[string][]*db.RepoTag{"foo/multi": tags}
+	if diff := cmp.Diff(want, repoTags(t, sqlDB), byModulePath, cmpopts.EquateApproxTime(time.Second)); diff != "" {
 		t.Errorf("StoreRepoTags: -want,+got: %s", diff)
 	}
 }
@@ -168,11 +196,9 @@ var reindexWorkerTestCases = []*reindexWorkerTestCase{
 }
 
 func TestNextReindexAllReposWork_Basic(t *testing.T) {
-	sutDB, sqlDB := setupDB(t)
-
 	for _, tc := range reindexWorkerTestCases {
 		t.Run(tc.name, func(t *testing.T) {
-			resetTables(t, sqlDB)
+			sutDB, sqlDB := setupDB(t)
 			setAllReposIndexing(t, sqlDB, time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
 			shouldReindex, err := sutDB.NextReindexAllReposWork(t.Context(), 5*time.Minute, 24*time.Hour)
 			if err != nil {
@@ -190,7 +216,6 @@ func TestNextReindexAllReposWork_QuickSuccession(t *testing.T) {
 	// the first time should return & update it.
 
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 	setAllReposIndexing(t, sqlDB, time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
 
 	// Take work for the first time: should return true.
@@ -213,11 +238,9 @@ func TestNextReindexAllReposWork_QuickSuccession(t *testing.T) {
 }
 
 func TestNextReindexRepoTagsWork_SingleRepo(t *testing.T) {
-	sutDB, sqlDB := setupDB(t)
-
 	for _, tc := range reindexWorkerTestCases {
 		t.Run(tc.name, func(t *testing.T) {
-			resetTables(t, sqlDB)
+			sutDB, sqlDB := setupDB(t)
 			populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
 			setSingleRepoIndexing(t, sqlDB, "foo/bar", tc.lastIndexingBegan, tc.lastIndexingFinished)
 
@@ -243,8 +266,7 @@ func TestNextReindexRepoTagsWork_SingleRepo(t *testing.T) {
 }
 
 func TestNextReindexRepoTagsWork_NoRepos(t *testing.T) {
-	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
+	sutDB, _ := setupDB(t)
 	_, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 5*time.Minute, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -259,7 +281,6 @@ func TestNextReindexRepoTagsWork_QuickSuccession(t *testing.T) {
 	// the first time should return & update it.
 
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 	populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
 	setSingleRepoIndexing(t, sqlDB, "foo/bar", time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
 
@@ -286,7 +307,6 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeReindexNeeded(t *testing.T) {
 	// When one repo needs re-indexing and another doesn't, take the one that does.
 
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 
 	populateRepoTags(t, sqlDB, []*db.RepoTag{
 		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)},
@@ -314,7 +334,6 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeOldestNeedingReindexing(t *tes
 	// When multiple repos need re-indexing, take the oldest.
 
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 
 	populateRepoTags(t, sqlDB, []*db.RepoTag{
 		{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
@@ -342,7 +361,6 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeOldestNeedingReindexing(t *tes
 
 func TestNextReindexRepoTags_Roundtrip(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
-	resetTables(t, sqlDB)
 	populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)}})
 
 	// First, get some work.

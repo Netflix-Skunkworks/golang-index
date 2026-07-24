@@ -177,9 +177,11 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 	var valueStrings []string
 	var valueArgs []any
 	orgRepoNames := make(map[string]bool)
-	// keepRepos/keepTags zip the authoritative incoming (org_repo_name, tag_name)
-	// pairs into parallel arrays for the delete-stale anti-join below.
+	// keepRepos/keepModulePaths/keepTags zip the authoritative incoming
+	// (org_repo_name, module_path, tag_name) rows into parallel arrays for the
+	// delete-stale anti-join below.
 	keepRepos := make([]string, len(repoTags))
+	keepModulePaths := make([]string, len(repoTags))
 	keepTags := make([]string, len(repoTags))
 	for i, rt := range repoTags {
 		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", fieldCount*i+1, fieldCount*i+2, fieldCount*i+3, fieldCount*i+4))
@@ -189,6 +191,7 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 		valueArgs = append(valueArgs, rt.Created.Format(time.RFC3339))
 		orgRepoNames[rt.OrgRepoName] = true
 		keepRepos[i] = rt.OrgRepoName
+		keepModulePaths[i] = rt.ModulePath
 		keepTags[i] = rt.TagName
 	}
 	repoList := make([]string, 0, len(orgRepoNames))
@@ -212,18 +215,19 @@ DELETE FROM repo_tags rt
 WHERE rt.org_repo_name = ANY($1)
 AND NOT EXISTS (
     SELECT 1
-    FROM unnest($2::text[], $3::text[]) AS keep(org_repo_name, tag_name)
+    FROM unnest($2::text[], $3::text[], $4::text[]) AS keep(org_repo_name, module_path, tag_name)
     WHERE keep.org_repo_name = rt.org_repo_name
+    AND keep.module_path = rt.module_path
     AND keep.tag_name = rt.tag_name
 );`
-	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepTags)); err != nil {
+	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepModulePaths), pq.Array(keepTags)); err != nil {
 		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)
 	}
 
 	query = fmt.Sprintf(`
 INSERT INTO repo_tags (org_repo_name, tag_name, module_path, created)
 VALUES %s
-ON CONFLICT (org_repo_name, tag_name) DO UPDATE
+ON CONFLICT (org_repo_name, module_path, tag_name) DO UPDATE
 SET created = EXCLUDED.created;`, strings.Join(valueStrings, ",\n"))
 	if _, err := tx.ExecContext(ctx, query, valueArgs...); err != nil {
 		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)

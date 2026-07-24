@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3
+	github.com/fergusstrange/embedded-postgres v1.34.0
 	github.com/golang-migrate/migrate/v4 v4.18.3
 	github.com/google/go-cmp v0.7.0
 	github.com/lib/pq v1.10.9
@@ -18,6 +19,7 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
+	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 )

@@ -1,99 +1,23 @@
 package db_test
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/Netflix-Skunkworks/golang-index/internal/db"
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
-
-	_ "github.com/golang-migrate/migrate/v4/source/file"
-	_ "github.com/lib/pq"
+	"github.com/Netflix-Skunkworks/golang-index/internal/pgtest"
 )
+
+// TestMain runs one embedded Postgres for the whole package; each test gets its
+// own freshly-migrated database via [pgtest.FreshDB].
+func TestMain(m *testing.M) { os.Exit(pgtest.RunMain(m)) }
 
 func setupDB(t *testing.T) (*db.DB, *sql.DB) {
 	t.Helper()
-
-	username := os.Getenv("POSTGRES_USERNAME")
-	if username == "" {
-		t.Fatal("POSTGRES_USERNAME is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
-	}
-	password := os.Getenv("POSTGRES_PASSWORD")
-	if password == "" {
-		t.Fatal("POSTGRES_PASSWORD is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
-	}
-	host := os.Getenv("POSTGRES_HOST")
-	if host == "" {
-		t.Fatal("POSTGRES_HOST is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
-	}
-	portStr := os.Getenv("POSTGRES_PORT")
-	if portStr == "" {
-		t.Fatal("POSTGRES_PORT is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
-	}
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		t.Fatalf("POSTGRES_PORT is invalid: %v", err)
-	}
-	dbname := os.Getenv("POSTGRES_DB")
-	if dbname == "" {
-		t.Fatal("POSTGRES_DB is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
-	}
-
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", username, password, host, port, dbname)
-	sqlDB, err := sql.Open("postgres", connStr)
-	if err != nil {
-		t.Fatalf("setupDB: error opening db %s: %v", connStr, err)
-	}
-
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-
-	if err := sqlDB.PingContext(ctx); err != nil {
-		t.Fatalf("setupDB: error pinging db %s: %v", connStr, err)
-	}
-
-	sutDB, err := db.NewDB(username, password, host, uint16(port), dbname)
-	if err != nil {
-		t.Fatalf("setupDB: error creating new DB: %v", err)
-	}
-
-	return sutDB, sqlDB
-}
-
-// Drops tables and re-runs migrations.
-func resetTables(t *testing.T, db *sql.DB) {
-	t.Helper()
-
-	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repo_tags;"); err != nil {
-		t.Fatalf("resetTables: error dropping repo_tags table: %v", err)
-	}
-	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repos;"); err != nil {
-		t.Fatalf("resetTables: error dropping repos table: %v", err)
-	}
-	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repo_indexing;"); err != nil {
-		t.Fatalf("resetTables: error dropping repo_indexing table: %v", err)
-	}
-	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS schema_migrations;"); err != nil {
-		t.Fatalf("resetTables: error dropping repo_indexing table: %v", err)
-	}
-
-	driver, err := postgres.WithInstance(db, &postgres.Config{})
-	if err != nil {
-		t.Fatalf("resetTables: error creating postgres driver: %v", err)
-	}
-	m, err := migrate.NewWithDatabaseInstance("file://../../migrations", "postgres", driver)
-	if err != nil {
-		t.Fatalf("resetTables: error creating database migrator: %v", err)
-	}
-	if err := m.Up(); err != nil {
-		t.Fatalf("resetTables: error running migrations: %v", err)
-	}
+	return pgtest.FreshDB(t)
 }
 
 // Returns a map of orgRepoName to RepoTag. Includes repos which have no tags.
@@ -158,7 +82,7 @@ ON CONFLICT (org_repo_name) DO NOTHING;`, rt.OrgRepoName)
 		query = fmt.Sprintf(`
 INSERT INTO repo_tags (org_repo_name, tag_name, module_path, created, indexed_at)
 VALUES ('%s', '%s', '%s', TIMESTAMP WITH TIME ZONE '%s', TIMESTAMP WITH TIME ZONE '%s')
-ON CONFLICT (org_repo_name, tag_name) DO UPDATE
+ON CONFLICT (org_repo_name, module_path, tag_name) DO UPDATE
 SET created = EXCLUDED.created, indexed_at = EXCLUDED.indexed_at;`,
 			rt.OrgRepoName, rt.TagName, rt.ModulePath, rt.Created.Format(time.RFC3339), rt.IndexedAt.Format(time.RFC3339))
 		if _, err := db.ExecContext(t.Context(), query); err != nil {
