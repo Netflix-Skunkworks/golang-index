@@ -1,0 +1,7 @@
+# No go.mod at HEAD and no tags: there is no module to synthesize a pseudo-version
+# for, so the repo produces no versions.
+repo someorg/nogomodhead
+head 110022003300440055006600770088009900aabb 2026-07-08T09:10:11Z
+-- someorg/nogomodhead/README.md --
+hi
+-- want --

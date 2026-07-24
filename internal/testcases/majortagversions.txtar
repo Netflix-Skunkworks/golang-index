@@ -1,0 +1,18 @@
+# The other way to release v2+: no /v2 subdirectory — the root go.mod's module
+# path gained the /v2 suffix and v2 is tagged from the root like every other
+# version. The older v1 tag still points at a commit whose go.mod had no suffix
+# (an @ref override below), so two tags that look alike resolve to two module
+# paths, and the v1 tag is not rejected for lacking the suffix its successor has.
+repo someorg/majortag
+head 5555555555555555555555555555555555555555 2026-06-01T00:00:00Z
+tag v1.3.0 2025-01-06T00:00:00Z
+tag v2.0.0 2025-02-06T00:00:00Z
+tag v2.1.0 2025-03-06T00:00:00Z
+-- someorg/majortag/go.mod --
+module go.example.com/majortag/v2
+-- someorg/majortag@v1.3.0/go.mod --
+module go.example.com/majortag
+-- want --
+someorg/majortag go.example.com/majortag v1.3.0 2025-01-06T00:00:00Z
+someorg/majortag go.example.com/majortag/v2 v2.0.0 2025-02-06T00:00:00Z
+someorg/majortag go.example.com/majortag/v2 v2.1.0 2025-03-06T00:00:00Z

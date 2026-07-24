@@ -46,6 +46,15 @@ func NewGithubSCM(client githubClient, baseURL, githubHostName string, httpClien
 	}
 }
 
+// NewEnterpriseSCM builds a GithubSCM for a GitHub Enterprise host, wiring the
+// GraphQL client (at baseURL+"/api/graphql") and the raw/REST calls to the same
+// httpClient. baseURL is where requests are sent (possibly a proxy);
+// githubHostName is the enterprise host used for module paths and repo URLs.
+func NewEnterpriseSCM(baseURL, githubHostName string, httpClient *http.Client) *GithubSCM {
+	graphql := githubv4.NewEnterpriseClient(baseURL+"/api/graphql", httpClient)
+	return NewGithubSCM(graphql, baseURL, githubHostName, httpClient)
+}
+
 type repoQueryResult struct {
 	Search struct {
 		Edges    []repoQueryEdge

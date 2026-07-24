@@ -1,0 +1,16 @@
+# No semver tags, so every module gets a HEAD pseudo-version whose Created is the
+# commit date. The root and cmd/tool are both v0, so they share an identical
+# pseudo-version string and differ only by module path: the case that used to
+# crash StoreRepoModuleVersions.
+repo someorg/multi
+head abcdef0123456789abcdef0123456789abcdef01 2026-01-02T03:04:05Z
+-- someorg/multi/go.mod --
+module go.example.com/multi
+-- someorg/multi/tracing/go.mod --
+module go.example.com/multi/tracing/v2
+-- someorg/multi/cmd/tool/go.mod --
+module go.example.com/multi/cmd/tool
+-- want --
+someorg/multi go.example.com/multi v0.0.0-20260102030405-abcdef012345 2026-01-02T03:04:05Z
+someorg/multi go.example.com/multi/cmd/tool v0.0.0-20260102030405-abcdef012345 2026-01-02T03:04:05Z
+someorg/multi go.example.com/multi/tracing/v2 v2.0.0-20260102030405-abcdef012345 2026-01-02T03:04:05Z

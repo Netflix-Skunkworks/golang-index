@@ -1,0 +1,17 @@
+# Two repos declare the same module path at the same version, as a fork or mirror
+# would. Both rows must coexist: row identity is (org_repo_name, module_path,
+# version), so one repo's store must not delete the other's.
+repo someorg/shared-a
+head aaaa000000000000000000000000000000000000 2026-01-01T00:00:00Z
+tag v1.0.0 2025-01-02T03:04:05Z
+
+repo someorg/shared-b
+head bbbb000000000000000000000000000000000000 2026-01-01T00:00:00Z
+tag v1.0.0 2025-06-07T08:09:10Z
+-- someorg/shared-a/go.mod --
+module go.example.com/shared
+-- someorg/shared-b/go.mod --
+module go.example.com/shared
+-- want --
+someorg/shared-a go.example.com/shared v1.0.0 2025-01-02T03:04:05Z
+someorg/shared-b go.example.com/shared v1.0.0 2025-06-07T08:09:10Z

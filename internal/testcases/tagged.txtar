@@ -1,0 +1,11 @@
+# The plain case: one root module with two semver tags, one version each, and a
+# Created taken from the tag date.
+repo someorg/tagged
+head 1111111111111111111111111111111111111111 2026-06-01T00:00:00Z
+tag v1.0.0 2025-01-02T03:04:05Z
+tag v1.1.0 2025-02-02T03:04:05Z
+-- someorg/tagged/go.mod --
+module go.example.com/tagged
+-- want --
+someorg/tagged go.example.com/tagged v1.0.0 2025-01-02T03:04:05Z
+someorg/tagged go.example.com/tagged v1.1.0 2025-02-02T03:04:05Z

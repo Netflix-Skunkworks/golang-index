@@ -1,0 +1,15 @@
+# The repo has qualifying tags, so the pseudo-version fallback does not fire.
+# The experimental module has a go.mod but no tag, so it gets no version at all.
+repo someorg/tagless
+head dd00112233445566778899aabbccddeeff001122 2026-04-05T06:07:08Z
+tag v1.0.0 2025-05-05T00:00:00Z
+tag tracing/v0.3.0 2025-06-06T00:00:00Z
+-- someorg/tagless/go.mod --
+module go.example.com/tagless
+-- someorg/tagless/tracing/go.mod --
+module go.example.com/tagless/tracing
+-- someorg/tagless/experimental/go.mod --
+module go.example.com/tagless/experimental
+-- want --
+someorg/tagless go.example.com/tagless v1.0.0 2025-05-05T00:00:00Z
+someorg/tagless go.example.com/tagless/tracing v0.3.0 2025-06-06T00:00:00Z

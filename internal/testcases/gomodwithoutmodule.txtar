@@ -1,0 +1,7 @@
+# A go.mod with no module line yields no module path, so the repo produces no
+# versions — without breaking the rest of the pipeline.
+repo someorg/nomodule
+head ff00112233445566778899aabbccddeeff001122 2026-06-07T08:09:10Z
+-- someorg/nomodule/go.mod --
+go 1.22
+-- want --

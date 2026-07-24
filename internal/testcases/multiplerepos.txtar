@@ -1,0 +1,23 @@
+# A single index cycle must drain the whole work queue, not just the first repo,
+# so all three of these unrelated repos get indexed.
+repo someorg/one
+head 0001000000000000000000000000000000000000 2026-01-01T00:00:00Z
+tag v1.0.0 2025-01-01T00:00:00Z
+
+repo someorg/two
+head 0002000000000000000000000000000000000000 2026-01-02T00:00:00Z
+tag v2.0.0 2025-01-02T00:00:00Z
+
+repo someorg/three
+head 0003000000000000000000000000000000000000 2026-01-03T00:00:00Z
+tag v3.0.0 2025-01-03T00:00:00Z
+-- someorg/one/go.mod --
+module go.example.com/one
+-- someorg/two/go.mod --
+module go.example.com/two/v2
+-- someorg/three/go.mod --
+module go.example.com/three/v3
+-- want --
+someorg/one go.example.com/one v1.0.0 2025-01-01T00:00:00Z
+someorg/three go.example.com/three/v3 v3.0.0 2025-01-03T00:00:00Z
+someorg/two go.example.com/two/v2 v2.0.0 2025-01-02T00:00:00Z

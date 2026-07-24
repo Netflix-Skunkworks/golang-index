@@ -1,0 +1,20 @@
+# Tags change upstream between the two index cycles: v1.2.0 appears and v1.1.0 is
+# deleted. The new version is stored, the deleted one is pruned, and v1.0.0 keeps
+# the indexed_at it already had (which every subtest checks; see harness.assertFeed).
+repo someorg/churn
+head 3333333333333333333333333333333333333333 2026-06-01T00:00:00Z
+tag v1.0.0 2025-01-02T03:04:05Z
+tag v1.1.0 2025-02-02T03:04:05Z
+
+cycle
+repo someorg/churn
+untag v1.1.0
+tag v1.2.0 2025-03-03T03:03:03Z
+-- someorg/churn/go.mod --
+module go.example.com/churn
+-- want --
+someorg/churn go.example.com/churn v1.0.0 2025-01-02T03:04:05Z
+someorg/churn go.example.com/churn v1.1.0 2025-02-02T03:04:05Z
+-- want.2 --
+someorg/churn go.example.com/churn v1.0.0 2025-01-02T03:04:05Z
+someorg/churn go.example.com/churn v1.2.0 2025-03-03T03:03:03Z
