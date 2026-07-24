@@ -54,34 +54,48 @@ func (ix *AllReposIndexer) Run(ctx context.Context) error {
 	}
 
 	for {
-		shouldReindex, err := ix.DB.NextReindexAllReposWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+		retryable, err := ix.IndexAllReposOnce(ctx)
 		if err != nil {
-			return fmt.Errorf("error fetching next reindex all repos work: %v", err)
-		}
-
-		if shouldReindex {
-			slog.Info("Should re-index all Go repos: yes")
-			allRepos, err := ix.Lister.GoRepos(ctx)
-			if err != nil {
-				// TODO(jbarkhuysen): Add some metrics/alerting here.
-				slog.Error(fmt.Sprintf("Error fetching all Go repos: %v", err))
-				if err := sleep(ctx, bo.NextBackOff()); err != nil {
-					return err
-				}
-				continue
+			if !retryable {
+				return err
 			}
-			if err := ix.DB.StoreRepos(ctx, allRepos); err != nil {
-				return fmt.Errorf("error storing all repos: %v", err)
+			// TODO(jbarkhuysen): Add some metrics/alerting here.
+			slog.Error(err.Error())
+			if err := sleep(ctx, bo.NextBackOff()); err != nil {
+				return err
 			}
-			slog.Info(fmt.Sprintf("Finished re-indexing all Go repos, saw %d repos", len(allRepos)))
-		} else {
-			slog.Info(fmt.Sprintf("Should re-index all Go repos: no, waiting %v to check again", ix.WorkCheckPeriod))
+			continue
 		}
-
 		if err := sleep(ctx, ix.WorkCheckPeriod); err != nil {
 			return err
 		}
 	}
+}
+
+// IndexAllReposOnce performs a single all-repos pass: if the work queue says a
+// reindex is due, it refreshes the stored list of Go repos. [AllReposIndexer.Run]
+// calls it in a loop. A retryable error is a transient GitHub failure the caller
+// should back off on; a non-retryable error is fatal.
+func (ix *AllReposIndexer) IndexAllReposOnce(ctx context.Context) (retryable bool, err error) {
+	shouldReindex, err := ix.DB.NextReindexAllReposWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+	if err != nil {
+		return false, fmt.Errorf("error fetching next reindex all repos work: %v", err)
+	}
+	if !shouldReindex {
+		slog.Info(fmt.Sprintf("Should re-index all Go repos: no, waiting %v to check again", ix.WorkCheckPeriod))
+		return false, nil
+	}
+
+	slog.Info("Should re-index all Go repos: yes")
+	allRepos, err := ix.Lister.GoRepos(ctx)
+	if err != nil {
+		return true, fmt.Errorf("error fetching all Go repos: %v", err)
+	}
+	if err := ix.DB.StoreRepos(ctx, allRepos); err != nil {
+		return false, fmt.Errorf("error storing all repos: %v", err)
+	}
+	slog.Info(fmt.Sprintf("Finished re-indexing all Go repos, saw %d repos", len(allRepos)))
+	return false, nil
 }
 
 // repoTagsStore is the DB access the repo-tags indexer needs; [*db.DB]
@@ -130,43 +144,63 @@ func (ix *RepoTagsIndexer) Run(ctx context.Context) error {
 	}
 
 	for {
-		repoToReindex, gotWork, err := ix.DB.NextReindexRepoTagsWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+		gotWork, retryable, err := ix.IndexNextRepoOnce(ctx)
 		if err != nil {
-			return fmt.Errorf("error fetching next reindex repo tags work: %v", err)
-		}
-		if !gotWork {
-			// Jitter the wait so the workers don't all poll in lockstep.
-			jitter := time.Duration(rand.Intn(60)+1) * time.Second
-			waitTime := ix.WorkCheckPeriod + jitter
-			logger.Info(fmt.Sprintf("Repo tags re-indexing: no work, waiting %v to check again", waitTime))
-			if err := sleep(ctx, waitTime); err != nil {
+			if !retryable {
 				return err
 			}
-			continue
-		}
-
-		logger.Info(fmt.Sprintf("Repo tags re-indexing: got work for repo %s", repoToReindex))
-		repoTags, err := ix.repoTags(ctx, repoToReindex)
-		if err != nil {
 			// TODO(jbarkhuysen): Add some metrics/alerting here.
-			logger.Error(fmt.Sprintf("Error fetching repo tags: %v", err))
+			logger.Error(err.Error())
 			if err := sleep(ctx, bo.NextBackOff()); err != nil {
 				return err
 			}
 			continue
 		}
-		if len(repoTags) == 0 {
+		if gotWork {
+			// Eagerly check for new work rather than waiting again.
 			continue
 		}
 
-		logger.Info(fmt.Sprintf("Repo tags re-indexing: storing %d module versions for repo %s", len(repoTags), repoToReindex))
-		if err := ix.DB.StoreRepoTags(ctx, repoTags); err != nil {
-			return fmt.Errorf("error storing repo tags: %v", err)
+		// Jitter the wait so the workers don't all poll in lockstep.
+		jitter := time.Duration(rand.Intn(60)+1) * time.Second
+		waitTime := ix.WorkCheckPeriod + jitter
+		logger.Info(fmt.Sprintf("Repo tags re-indexing: no work, waiting %v to check again", waitTime))
+		if err := sleep(ctx, waitTime); err != nil {
+			return err
 		}
-		logger.Info(fmt.Sprintf("Repo tags re-indexing: stored %d module versions for repo %s", len(repoTags), repoToReindex))
-
-		// Eagerly check for new work rather than waiting again.
 	}
+}
+
+// IndexNextRepoOnce re-indexes at most one queued repo's module versions.
+// gotWork reports whether a repo was claimed from the queue. [RepoTagsIndexer.Run]
+// calls it in a loop. A retryable error is a transient GitHub failure the caller
+// should back off on; a non-retryable error is fatal.
+func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retryable bool, err error) {
+	logger := slog.With("workerID", ix.WorkerID)
+
+	repoToReindex, gotWork, err := ix.DB.NextReindexRepoTagsWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+	if err != nil {
+		return false, false, fmt.Errorf("error fetching next reindex repo tags work: %v", err)
+	}
+	if !gotWork {
+		return false, false, nil
+	}
+
+	logger.Info(fmt.Sprintf("Repo tags re-indexing: got work for repo %s", repoToReindex))
+	repoTags, err := ix.repoTags(ctx, repoToReindex)
+	if err != nil {
+		return true, true, fmt.Errorf("error fetching repo tags for %s: %v", repoToReindex, err)
+	}
+	if len(repoTags) == 0 {
+		return true, false, nil
+	}
+
+	logger.Info(fmt.Sprintf("Repo tags re-indexing: storing %d module versions for repo %s", len(repoTags), repoToReindex))
+	if err := ix.DB.StoreRepoTags(ctx, repoTags); err != nil {
+		return true, false, fmt.Errorf("error storing repo tags: %v", err)
+	}
+	logger.Info(fmt.Sprintf("Repo tags re-indexing: stored %d module versions for repo %s", len(repoTags), repoToReindex))
+	return true, false, nil
 }
 
 // repoTags reads a repo's module versions and shapes them into the DB rows to
