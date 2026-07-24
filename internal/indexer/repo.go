@@ -20,6 +20,7 @@ type scm interface {
 	RepoTags(ctx context.Context, orgRepoName string) ([]github.Tag, error)
 	HeadCommit(ctx context.Context, orgRepoName string) (oid string, committed time.Time, err error)
 	GoMod(ctx context.Context, orgRepoName, ref, subdir string) (content []byte, found bool, err error)
+	ModuleDirs(ctx context.Context, orgRepoName, ref string) (subdirs []string, err error)
 }
 
 // moduleVersionsForRepo returns a module version for each of a repo's semver
@@ -65,22 +66,21 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName strin
 	}
 
 	if len(versions) == 0 {
-		pseudo, err := headPseudoVersion(ctx, scm, orgRepoName)
+		pseudos, err := headPseudoVersions(ctx, scm, orgRepoName)
 		if err != nil {
 			return nil, err
 		}
-		if pseudo != nil {
-			versions = append(versions, pseudo)
-		}
+		versions = append(versions, pseudos...)
 	}
 
 	return versions, nil
 }
 
-// headPseudoVersion builds a [mod.ModuleVersion] for the root module at HEAD,
-// used when a repo has no semver tags. It returns nil when the repo has no
-// commit, no root go.mod, or a go.mod with an invalid module path.
-func headPseudoVersion(ctx context.Context, scm scm, orgRepoName string) (*mod.ModuleVersion, error) {
+// headPseudoVersions synthesizes a pseudo-version for every module in the repo
+// at HEAD, used when a repo has no semver tags. Multi-module repos get one per
+// module, not just the root. It returns nil when the repo has no commit or no
+// module with a valid module path (an empty repo, or one with no go.mod).
+func headPseudoVersions(ctx context.Context, scm scm, orgRepoName string) ([]*mod.ModuleVersion, error) {
 	oid, committedAt, err := scm.HeadCommit(ctx, orgRepoName)
 	if err != nil {
 		return nil, err
@@ -89,25 +89,34 @@ func headPseudoVersion(ctx context.Context, scm scm, orgRepoName string) (*mod.M
 		return nil, nil
 	}
 
-	modulePath, found, err := declaredModulePath(ctx, scm, orgRepoName, oid, "")
+	subdirs, err := scm.ModuleDirs(ctx, orgRepoName, oid)
 	if err != nil {
-		return nil, fmt.Errorf("error getting go.mod at HEAD for %s: %v", orgRepoName, err)
-	}
-	if !found {
-		return nil, nil
+		return nil, err
 	}
 
-	version := mod.PseudoVersion(modulePath, oid, committedAt)
-	if err := mod.Check(modulePath, version); err != nil {
-		slog.Debug(fmt.Sprintf("Skipping HEAD pseudo-version for %s: %v", orgRepoName, err))
-		return nil, nil
-	}
+	var versions []*mod.ModuleVersion
+	for _, subdir := range subdirs {
+		modulePath, found, err := declaredModulePath(ctx, scm, orgRepoName, oid, subdir)
+		if err != nil {
+			return nil, fmt.Errorf("error getting go.mod at HEAD for %s (subdir %q): %v", orgRepoName, subdir, err)
+		}
+		if !found {
+			continue
+		}
 
-	return &mod.ModuleVersion{
-		Version:    version,
-		Created:    committedAt,
-		ModulePath: modulePath,
-	}, nil
+		version := mod.PseudoVersion(modulePath, oid, committedAt)
+		if err := mod.Check(modulePath, version); err != nil {
+			slog.Debug(fmt.Sprintf("Skipping HEAD pseudo-version for %s (subdir %q): %v", orgRepoName, subdir, err))
+			continue
+		}
+
+		versions = append(versions, &mod.ModuleVersion{
+			Version:    version,
+			Created:    committedAt,
+			ModulePath: modulePath,
+		})
+	}
+	return versions, nil
 }
 
 // declaredModulePath returns the module path declared in the go.mod at subdir

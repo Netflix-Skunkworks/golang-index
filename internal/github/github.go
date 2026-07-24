@@ -3,9 +3,12 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -262,4 +265,86 @@ func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string
 	}
 
 	return bodyBytes, true, nil
+}
+
+// treeResponse is the subset of the git trees API response we read.
+type treeResponse struct {
+	Tree []struct {
+		Path string `json:"path"`
+		Type string `json:"type"`
+	} `json:"tree"`
+	Truncated bool `json:"truncated"`
+}
+
+// ModuleDirs returns the repo-relative directories that hold a go.mod at ref;
+// the repo root is the empty string. Non-module directories are skipped (see
+// moduleSubdir).
+func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) ([]string, error) {
+	repo, err := newRepo(orgRepoName)
+	if err != nil {
+		return nil, fmt.Errorf("ModuleDirs: %v", err)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(
+		queryCtx,
+		http.MethodGet,
+		fmt.Sprintf("%s/api/v3/repos/%s/%s/git/trees/%s?recursive=1", scm.baseURL, repo.org, repo.name, ref),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error building git trees API request: %v", err)
+	}
+
+	resp, err := scm.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("error querying git trees API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return nil, nil
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("unexpected status code from git trees API. Status code: %d", resp.StatusCode)
+	}
+
+	var tree treeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tree); err != nil {
+		return nil, fmt.Errorf("error decoding git trees API response: %v", err)
+	}
+	if tree.Truncated {
+		slog.Warn(fmt.Sprintf("git tree for %s is truncated; some modules may be missing", repo.fullName()))
+	}
+
+	var subdirs []string
+	for _, entry := range tree.Tree {
+		if entry.Type != "blob" {
+			continue
+		}
+		if subdir, ok := moduleSubdir(entry.Path); ok {
+			subdirs = append(subdirs, subdir)
+		}
+	}
+	return subdirs, nil
+}
+
+// moduleSubdir reports whether treePath is a repo module's go.mod and, if so,
+// the directory holding it (the repo root is the empty string). It skips go.mod
+// files under conventional non-module directories: vendor, testdata, and dot- or
+// underscore-prefixed dirs (matching how the go tool ignores them).
+func moduleSubdir(treePath string) (subdir string, ok bool) {
+	dir, file := path.Split(treePath)
+	if file != "go.mod" {
+		return "", false
+	}
+	subdir = strings.TrimSuffix(dir, "/")
+	for elem := range strings.SplitSeq(subdir, "/") {
+		if elem == "vendor" || elem == "testdata" || strings.HasPrefix(elem, ".") || strings.HasPrefix(elem, "_") {
+			return "", false
+		}
+	}
+	return subdir, true
 }

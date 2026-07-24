@@ -46,19 +46,29 @@ func (f *fakeRepoTagsStore) StoreRepoTags(ctx context.Context, repoTags []*db.Re
 	return f.storeRepoTags(ctx, repoTags)
 }
 
-// fakeSCM is an in-memory scm: it serves canned tags, HEAD, and go.mod files
-// without talking to GitHub.
+// fakeSCM is an in-memory scm: it serves canned tags, HEAD, module dirs, and
+// go.mod files without talking to GitHub.
 type fakeSCM struct {
 	tags    []github.Tag
 	headOID string
 	headAt  time.Time
-	// goMods maps a ref (a tag name or commit oid) to its go.mod contents. A ref
-	// that's absent has no go.mod.
-	goMods map[string]string
+	// goMods maps a (ref, subdir) to that go.mod's contents. An absent key has no
+	// go.mod there.
+	goMods map[goModKey]string
+	// moduleDirs is what ModuleDirs returns: the subdirs holding a go.mod at HEAD
+	// (the repo root is "").
+	moduleDirs []string
 	// repoTagsFails makes the first repoTagsFails RepoTags calls return an error,
 	// to exercise transient-error handling. repoTagsCalls counts calls made.
 	repoTagsFails int
 	repoTagsCalls int
+}
+
+// goModKey identifies a go.mod by ref (a tag name or commit oid) and the subdir
+// it lives in (the repo root is "").
+type goModKey struct {
+	ref    string
+	subdir string
 }
 
 func (f *fakeSCM) RepoTags(context.Context, string) ([]github.Tag, error) {
@@ -73,9 +83,13 @@ func (f *fakeSCM) HeadCommit(context.Context, string) (string, time.Time, error)
 	return f.headOID, f.headAt, nil
 }
 
-func (f *fakeSCM) GoMod(_ context.Context, _, ref, _ string) ([]byte, bool, error) {
-	if content, ok := f.goMods[ref]; ok {
+func (f *fakeSCM) GoMod(_ context.Context, _, ref, subdir string) ([]byte, bool, error) {
+	if content, ok := f.goMods[goModKey{ref, subdir}]; ok {
 		return []byte(content), true, nil
 	}
 	return nil, false, nil
+}
+
+func (f *fakeSCM) ModuleDirs(_ context.Context, _, _ string) ([]string, error) {
+	return f.moduleDirs, nil
 }
