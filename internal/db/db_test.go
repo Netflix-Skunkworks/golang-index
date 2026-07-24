@@ -11,45 +11,45 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
-func TestFetchRepoTags(t *testing.T) {
+func TestFetchRepoModuleVersions(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 
 	now := time.Now()
-	// Ordered by IndexedAt ASC, as FetchRepoTags returns. The out-of-order Created
+	// Ordered by IndexedAt ASC, as FetchRepoModuleVersions returns. The out-of-order Created
 	// dates ensure the ordering can only come from IndexedAt.
-	allTags := []*db.RepoTag{
-		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now},
-		{OrgRepoName: "foo/bar", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/bar", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now.Add(time.Second)},
-		{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now.Add(time.Minute)},
+	allTags := []*db.RepoModuleVersion{
+		{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now},
+		{OrgRepoName: "foo/bar", Version: "v0.0.2", ModulePath: "github.somecompany.net/foo/bar", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now.Add(time.Second)},
+		{OrgRepoName: "foo/gaz", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: now.Add(time.Minute)},
 	}
-	populateRepoTags(t, sqlDB, allTags)
+	populateRepoModuleVersions(t, sqlDB, allTags)
 
 	// Get all.
-	gotTags, err := sutDB.FetchRepoTags(t.Context(), now.Add(-1*time.Hour), 1000)
+	gotTags, err := sutDB.FetchRepoModuleVersions(t.Context(), now.Add(-1*time.Hour), 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if diff := cmp.Diff(allTags, gotTags, cmpopts.EquateApproxTime(time.Second)); diff != "" {
-		t.Errorf("FetchRepoTags: -want,+got: %s", diff)
+		t.Errorf("FetchRepoModuleVersions: -want,+got: %s", diff)
 	}
 
 	// Get with limit.
-	gotTags, err = sutDB.FetchRepoTags(t.Context(), now.Add(-1*time.Hour), 2)
+	gotTags, err = sutDB.FetchRepoModuleVersions(t.Context(), now.Add(-1*time.Hour), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if diff := cmp.Diff(allTags[:2], gotTags, cmpopts.EquateApproxTime(time.Second)); diff != "" {
-		t.Errorf("FetchRepoTags: -want,+got: %s", diff)
+		t.Errorf("FetchRepoModuleVersions: -want,+got: %s", diff)
 	}
 
 	// Get with since: only the third tag was indexed after now+2s.
-	gotTags, err = sutDB.FetchRepoTags(t.Context(), now.Add(2*time.Second), 1)
+	gotTags, err = sutDB.FetchRepoModuleVersions(t.Context(), now.Add(2*time.Second), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if diff := cmp.Diff(allTags[2:], gotTags, cmpopts.EquateApproxTime(time.Second)); diff != "" {
-		t.Errorf("FetchRepoTags: -want,+got: %s", diff)
+		t.Errorf("FetchRepoModuleVersions: -want,+got: %s", diff)
 	}
 }
 
@@ -61,7 +61,7 @@ func TestStoreRepos(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gotRepos := slices.Sorted(maps.Keys(repoTags(t, sqlDB)))
+	gotRepos := slices.Sorted(maps.Keys(repoModuleVersions(t, sqlDB)))
 	wantRepos := []string{"foo/bar", "gaz/urk"}
 	if diff := cmp.Diff(wantRepos, gotRepos); diff != "" {
 		t.Errorf("StoreRepos: -want,+got: %s", diff)
@@ -71,40 +71,40 @@ func TestStoreRepos(t *testing.T) {
 	if err := sutDB.StoreRepos(t.Context(), []string{"foo/bar"}); err != nil {
 		t.Fatal(err)
 	}
-	gotRepos = slices.Sorted(maps.Keys(repoTags(t, sqlDB)))
+	gotRepos = slices.Sorted(maps.Keys(repoModuleVersions(t, sqlDB)))
 	if diff := cmp.Diff(wantRepos, gotRepos); diff != "" {
 		t.Errorf("StoreRepos: -want,+got: %s", diff)
 	}
 }
 
-func TestStoreRepoTags(t *testing.T) {
-	// Whenever we store tags for a repo, all pre-existing tags are removed.
-	// Only new tags remain.
+func TestStoreRepoModuleVersions(t *testing.T) {
+	// Whenever we store module versions for a repo, all pre-existing ones are
+	// removed; only the new set remains.
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 
 	if err := sutDB.StoreRepos(t.Context(), []string{"foo/bar", "foo/gaz"}); err != nil {
 		t.Fatal(err)
 	}
-	preExistingTag1 := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
-	preExistingTag2 := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.2", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
-	newTag := db.RepoTag{OrgRepoName: "foo/gaz", TagName: "v0.0.3", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
-	preExistingTag3 := db.RepoTag{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().UTC()}
+	preExistingTag1 := db.RepoModuleVersion{OrgRepoName: "foo/gaz", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
+	preExistingTag2 := db.RepoModuleVersion{OrgRepoName: "foo/gaz", Version: "v0.0.2", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
+	newTag := db.RepoModuleVersion{OrgRepoName: "foo/gaz", Version: "v0.0.3", ModulePath: "github.somecompany.net/foo/gaz", Created: time.Now().UTC()}
+	preExistingTag3 := db.RepoModuleVersion{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().UTC()}
 
-	populateRepoTags(t, sqlDB, []*db.RepoTag{&preExistingTag1, &preExistingTag2, &preExistingTag3})
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{&preExistingTag1, &preExistingTag2, &preExistingTag3})
 
 	// newTag is new. preExistingTag2 is not included.
-	if err := sutDB.StoreRepoTags(t.Context(), []*db.RepoTag{&preExistingTag1, &newTag, &preExistingTag3}); err != nil {
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), []*db.RepoModuleVersion{&preExistingTag1, &newTag, &preExistingTag3}); err != nil {
 		t.Fatal(err)
 	}
 
-	want := map[string][]*db.RepoTag{
+	want := map[string][]*db.RepoModuleVersion{
 		"foo/gaz": {&preExistingTag1, &newTag},
 		"foo/bar": {&preExistingTag3},
 	}
-	gotRepoTags := repoTags(t, sqlDB)
+	gotRepoTags := repoModuleVersions(t, sqlDB)
 	if diff := cmp.Diff(want, gotRepoTags, cmpopts.EquateApproxTime(time.Second)); diff != "" {
-		t.Errorf("StoreRepoTags: -want,+got: %s", diff)
+		t.Errorf("StoreRepoModuleVersions: -want,+got: %s", diff)
 	}
 }
 
@@ -218,7 +218,7 @@ func TestNextReindexRepoTagsWork_SingleRepo(t *testing.T) {
 	for _, tc := range reindexWorkerTestCases {
 		t.Run(tc.name, func(t *testing.T) {
 			resetTables(t, sqlDB)
-			populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
+			populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
 			setSingleRepoIndexing(t, sqlDB, "foo/bar", tc.lastIndexingBegan, tc.lastIndexingFinished)
 
 			gotRepoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), tc.reindexTTL, tc.reindexPeriod)
@@ -260,7 +260,7 @@ func TestNextReindexRepoTagsWork_QuickSuccession(t *testing.T) {
 
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
-	populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
 	setSingleRepoIndexing(t, sqlDB, "foo/bar", time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
 
 	// Take work for the first time: should return true.
@@ -288,9 +288,9 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeReindexNeeded(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 
-	populateRepoTags(t, sqlDB, []*db.RepoTag{
-		{OrgRepoName: "foo/bar", TagName: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)},
-		{OrgRepoName: "gaz/urk", TagName: "v0.0.1", ModulePath: "github.somecompany.net/gaz/urk", Created: time.Now().Add(-1000 * time.Hour)},
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{
+		{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)},
+		{OrgRepoName: "gaz/urk", Version: "v0.0.1", ModulePath: "github.somecompany.net/gaz/urk", Created: time.Now().Add(-1000 * time.Hour)},
 	})
 
 	// Does not need re-indexing (based on reindex period specified a bit below).
@@ -316,10 +316,10 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeOldestNeedingReindexing(t *tes
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 
-	populateRepoTags(t, sqlDB, []*db.RepoTag{
-		{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
-		{OrgRepoName: "bee/doh", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
-		{OrgRepoName: "gaz/urk", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{
+		{OrgRepoName: "foo/bar", Version: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
+		{OrgRepoName: "bee/doh", Version: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
+		{OrgRepoName: "gaz/urk", Version: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)},
 	})
 
 	// All need re-indexing (based on reindex period specified a bit below).
@@ -343,7 +343,7 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeOldestNeedingReindexing(t *tes
 func TestNextReindexRepoTags_Roundtrip(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
-	populateRepoTags(t, sqlDB, []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)}})
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)}})
 
 	// First, get some work.
 	gotRepoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), time.Hour, time.Hour) // Re-index TTL & period are unused here.
@@ -358,12 +358,12 @@ func TestNextReindexRepoTags_Roundtrip(t *testing.T) {
 	}
 
 	// Re-index and store the result.
-	newTags := []*db.RepoTag{{OrgRepoName: "foo/bar", TagName: "v0.0.1", Created: time.Now().Add(time.Minute)}}
-	if err := sutDB.StoreRepoTags(t.Context(), newTags); err != nil {
+	newTags := []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", Created: time.Now().Add(time.Minute)}}
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), newTags); err != nil {
 		t.Fatal(err)
 	}
 
-	// We should not be able to get work, since we just finished (StoreRepoTags)
+	// We should not be able to get work, since we just finished (StoreRepoModuleVersions)
 	// work within the last 1h.
 	_, gotWork, err = sutDB.NextReindexRepoTagsWork(t.Context(), time.Hour, time.Hour)
 	if err != nil {
