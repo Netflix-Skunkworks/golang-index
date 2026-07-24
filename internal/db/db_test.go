@@ -108,6 +108,36 @@ func TestStoreRepoModuleVersions(t *testing.T) {
 	}
 }
 
+func TestStoreRepoModuleVersions_Colliding(t *testing.T) {
+	// A repo with no semver tags gets one HEAD pseudo-version per module. Because a
+	// pseudo-version is derived from the commit, not the module path, sibling v0
+	// modules share an identical version string. They must coexist, keyed by
+	// module_path; a single-batch insert keyed only on (repo, tag) crashed here
+	// with "ON CONFLICT DO UPDATE command cannot affect row a second time".
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+
+	if err := sutDB.StoreRepos(t.Context(), []string{"foo/multi"}); err != nil {
+		t.Fatal(err)
+	}
+
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	const pseudo = "v0.0.0-20260102030405-abcdef012345"
+	tags := []*db.RepoModuleVersion{
+		{OrgRepoName: "foo/multi", Version: pseudo, ModulePath: "github.somecompany.net/foo/multi", Created: created},
+		{OrgRepoName: "foo/multi", Version: pseudo, ModulePath: "github.somecompany.net/foo/multi/cmd/tool", Created: created},
+	}
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), tags); err != nil {
+		t.Fatalf("StoreRepoModuleVersions with colliding pseudo-versions: %v", err)
+	}
+
+	byModulePath := cmpopts.SortSlices(func(a, b *db.RepoModuleVersion) bool { return a.ModulePath < b.ModulePath })
+	want := map[string][]*db.RepoModuleVersion{"foo/multi": tags}
+	if diff := cmp.Diff(want, repoModuleVersions(t, sqlDB), byModulePath, cmpopts.EquateApproxTime(time.Second)); diff != "" {
+		t.Errorf("StoreRepoModuleVersions: -want,+got: %s", diff)
+	}
+}
+
 // Both the "All repos" and "Tags for one repo" reindexing work queues work the
 // same way. So, we can share a single set of test cases for both.
 type reindexWorkerTestCase struct {

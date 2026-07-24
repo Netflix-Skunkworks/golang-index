@@ -158,7 +158,7 @@ ON CONFLICT (org_repo_name) DO NOTHING;`, rt.OrgRepoName)
 		query = fmt.Sprintf(`
 INSERT INTO repo_module_versions (org_repo_name, version, module_path, created, indexed_at)
 VALUES ('%s', '%s', '%s', TIMESTAMP WITH TIME ZONE '%s', TIMESTAMP WITH TIME ZONE '%s')
-ON CONFLICT (org_repo_name, version) DO UPDATE
+ON CONFLICT (org_repo_name, module_path, version) DO UPDATE
 SET created = EXCLUDED.created, indexed_at = EXCLUDED.indexed_at;`,
 			rt.OrgRepoName, rt.Version, rt.ModulePath, rt.Created.Format(time.RFC3339), rt.IndexedAt.Format(time.RFC3339))
 		if _, err := db.ExecContext(t.Context(), query); err != nil {

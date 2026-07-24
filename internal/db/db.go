@@ -179,9 +179,11 @@ func (d *DB) StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*
 	var valueStrings []string
 	var valueArgs []any
 	orgRepoNames := make(map[string]bool)
-	// keepRepos/keepVersions zip the authoritative incoming (org_repo_name, version)
-	// pairs into parallel arrays for the delete-stale anti-join below.
+	// keepRepos/keepModulePaths/keepVersions zip the authoritative incoming
+	// (org_repo_name, module_path, version) rows into parallel arrays for the
+	// delete-stale anti-join below.
 	keepRepos := make([]string, len(repoModuleVersions))
+	keepModulePaths := make([]string, len(repoModuleVersions))
 	keepVersions := make([]string, len(repoModuleVersions))
 	for i, rt := range repoModuleVersions {
 		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", fieldCount*i+1, fieldCount*i+2, fieldCount*i+3, fieldCount*i+4))
@@ -191,6 +193,7 @@ func (d *DB) StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*
 		valueArgs = append(valueArgs, rt.Created.Format(time.RFC3339))
 		orgRepoNames[rt.OrgRepoName] = true
 		keepRepos[i] = rt.OrgRepoName
+		keepModulePaths[i] = rt.ModulePath
 		keepVersions[i] = rt.Version
 	}
 	repoList := make([]string, 0, len(orgRepoNames))
@@ -214,18 +217,19 @@ DELETE FROM repo_module_versions rt
 WHERE rt.org_repo_name = ANY($1)
 AND NOT EXISTS (
     SELECT 1
-    FROM unnest($2::text[], $3::text[]) AS keep(org_repo_name, version)
+    FROM unnest($2::text[], $3::text[], $4::text[]) AS keep(org_repo_name, module_path, version)
     WHERE keep.org_repo_name = rt.org_repo_name
+    AND keep.module_path = rt.module_path
     AND keep.version = rt.version
 );`
-	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepVersions)); err != nil {
+	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepModulePaths), pq.Array(keepVersions)); err != nil {
 		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 
 	query = fmt.Sprintf(`
 INSERT INTO repo_module_versions (org_repo_name, version, module_path, created)
 VALUES %s
-ON CONFLICT (org_repo_name, version) DO UPDATE
+ON CONFLICT (org_repo_name, module_path, version) DO UPDATE
 SET created = EXCLUDED.created;`, strings.Join(valueStrings, ",\n"))
 	if _, err := tx.ExecContext(ctx, query, valueArgs...); err != nil {
 		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
