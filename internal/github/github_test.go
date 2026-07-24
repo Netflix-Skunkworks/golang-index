@@ -262,6 +262,67 @@ func TestGoMod(t *testing.T) {
 	})
 }
 
+func TestModuleDirs(t *testing.T) {
+	const oid = "abcdef0123456789abcdef0123456789abcdef01"
+	const treeJSON = `{
+		"tree": [
+			{"path": "go.mod", "type": "blob"},
+			{"path": "README.md", "type": "blob"},
+			{"path": "tracing", "type": "tree"},
+			{"path": "tracing/go.mod", "type": "blob"},
+			{"path": "cmd", "type": "tree"},
+			{"path": "cmd/tool", "type": "tree"},
+			{"path": "cmd/tool/go.mod", "type": "blob"},
+			{"path": "vendor/example.com/dep/go.mod", "type": "blob"},
+			{"path": "testdata/fixture/go.mod", "type": "blob"}
+		],
+		"truncated": false
+	}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if want := fmt.Sprintf("/api/v3/repos/someorg/repo1/git/trees/%s", oid); r.URL.Path != want {
+			t.Errorf("request path = %q, want %q", r.URL.Path, want)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("recursive"); got != "1" {
+			t.Errorf("recursive query param = %q, want %q", got, "1")
+		}
+		if _, err := w.Write([]byte(treeJSON)); err != nil {
+			t.Errorf("writing tree response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	sut := NewGithubSCM(nil, server.URL, testGithubHostname, &http.Client{})
+	got, err := sut.ModuleDirs(t.Context(), "someorg/repo1", oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Root and both submodules are modules; vendor and testdata are skipped.
+	want := []string{"", "tracing", "cmd/tool"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("ModuleDirs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestModuleDirs_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	sut := NewGithubSCM(nil, server.URL, testGithubHostname, &http.Client{})
+	got, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	if err != nil {
+		t.Fatalf("ModuleDirs returned error for a 404, want none: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ModuleDirs = %v, want no dirs for a 404", got)
+	}
+}
+
 func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.String, hasNextPage bool) repoQueryResult {
 	t.Helper()
 

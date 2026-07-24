@@ -18,11 +18,14 @@ type tagSpec struct {
 }
 
 func fakeFromTags(specs []tagSpec) *fakeSCM {
-	f := &fakeSCM{goMods: map[string]string{}}
+	f := &fakeSCM{goMods: map[goModKey]string{}}
 	for _, s := range specs {
 		f.tags = append(f.tags, github.Tag{Name: s.tag, Date: s.date})
 		if s.goModContent != "" {
-			f.goMods[s.tag] = s.goModContent
+			// A subdir tag's go.mod is read at (tag, subdir), matching how
+			// moduleVersionsForRepo calls GoMod.
+			subdir, _, _ := mod.ModuleVersionFromTag(s.tag)
+			f.goMods[goModKey{ref: s.tag, subdir: subdir}] = s.goModContent
 		}
 	}
 	return f
@@ -143,51 +146,40 @@ func TestModuleVersionsForRepo_SkipsMajorVersionMismatch(t *testing.T) {
 	}
 }
 
-func TestModuleVersionsForRepo_SynthesizesPseudoVersion(t *testing.T) {
+func TestModuleVersionsForRepo_NoPseudoVersionWhenHeadHasNoGoMod(t *testing.T) {
+	commitDate := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	// HEAD exists but the repo has no modules, so there's nothing to synthesize.
+	scm := &fakeSCM{headOID: "abcdef0123456789abcdef0123456789abcdef01", headAt: commitDate}
+
+	if got := versionsForRepo(t, scm); len(got) != 0 {
+		t.Errorf("moduleVersionsForRepo() = %d versions, want 0", len(got))
+	}
+}
+
+func TestModuleVersionsForRepo_SynthesizesPseudoVersions(t *testing.T) {
 	commitDate := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	const oid = "abcdef0123456789abcdef0123456789abcdef01"
 
-	tests := []struct {
-		name         string
-		oid          string
-		goModContent string
-		want         []*mod.ModuleVersion
-	}{
-		{
-			name:         "root module",
-			oid:          oid,
-			goModContent: "module go.example.com/thing\n",
-			want:         []*mod.ModuleVersion{{Version: "v0.0.0-20260102030405-abcdef012345", Created: commitDate, ModulePath: "go.example.com/thing"}},
-		},
-		{
-			name:         "v2 module",
-			oid:          oid,
-			goModContent: "module go.example.com/thing/v2\n",
-			want:         []*mod.ModuleVersion{{Version: "v2.0.0-20260102030405-abcdef012345", Created: commitDate, ModulePath: "go.example.com/thing/v2"}},
-		},
-		{
-			name: "no go.mod at HEAD",
-			oid:  oid,
-			want: nil,
-		},
-		{
-			name: "empty repo has no HEAD",
-			oid:  "",
-			want: nil,
+	// A repo with no semver tags: a root module plus two submodules. Every module
+	// should get a HEAD pseudo-version, not just the root.
+	scm := &fakeSCM{
+		headOID:    oid,
+		headAt:     commitDate,
+		moduleDirs: []string{"", "tracing", "cmd/tool"},
+		goMods: map[goModKey]string{
+			{ref: oid, subdir: ""}:         "module go.example.com/thing\n",
+			{ref: oid, subdir: "tracing"}:  "module go.example.com/thing/tracing/v2\n",
+			{ref: oid, subdir: "cmd/tool"}: "module go.example.com/thing/cmd/tool\n",
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// HEAD's go.mod is fetched at the commit oid, so key the fake on it.
-			scm := &fakeSCM{headOID: tc.oid, headAt: commitDate, goMods: map[string]string{}}
-			if tc.goModContent != "" {
-				scm.goMods[tc.oid] = tc.goModContent
-			}
+	want := []*mod.ModuleVersion{
+		{Version: "v0.0.0-20260102030405-abcdef012345", Created: commitDate, ModulePath: "go.example.com/thing"},
+		{Version: "v2.0.0-20260102030405-abcdef012345", Created: commitDate, ModulePath: "go.example.com/thing/tracing/v2"},
+		{Version: "v0.0.0-20260102030405-abcdef012345", Created: commitDate, ModulePath: "go.example.com/thing/cmd/tool"},
+	}
 
-			if diff := cmp.Diff(tc.want, versionsForRepo(t, scm)); diff != "" {
-				t.Errorf("moduleVersionsForRepo mismatch (-want +got):\n%s", diff)
-			}
-		})
+	if diff := cmp.Diff(want, versionsForRepo(t, scm)); diff != "" {
+		t.Errorf("moduleVersionsForRepo mismatch (-want +got):\n%s", diff)
 	}
 }
