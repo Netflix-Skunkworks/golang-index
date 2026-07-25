@@ -17,7 +17,7 @@ const defaultNumberOfOutputs = int64(2000)
 
 // Exists to allow tests to mock the db.
 type idb interface {
-	FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([]*db.RepoTag, error)
+	FetchRepoModuleVersions(ctx context.Context, since time.Time, limit int64) ([]*db.RepoModuleVersion, error)
 }
 
 type server struct {
@@ -55,17 +55,17 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	repoTags, err := s.idb.FetchRepoTags(r.Context(), since, limit)
+	repoModuleVersions, err := s.idb.FetchRepoModuleVersions(r.Context(), since, limit)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("error fetching repo tags: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	var lines []string
-	for _, rt := range repoTags {
+	for _, rt := range repoModuleVersions {
 		out, err := json.Marshal(&module{
 			Path:      rt.ModulePath,
-			Version:   rt.TagName,
+			Version:   rt.Version,
 			Timestamp: rt.IndexedAt.Format(time.RFC3339Nano),
 		})
 		if err != nil {

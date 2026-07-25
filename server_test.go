@@ -13,27 +13,27 @@ import (
 )
 
 type fakeDB struct {
-	repoTagsToReturn []*db.RepoTag
+	repoTagsToReturn []*db.RepoModuleVersion
 }
 
-func (fake *fakeDB) FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([]*db.RepoTag, error) {
+func (fake *fakeDB) FetchRepoModuleVersions(ctx context.Context, since time.Time, limit int64) ([]*db.RepoModuleVersion, error) {
 	return fake.repoTagsToReturn, nil
 }
 
 func TestHandleIndex(t *testing.T) {
 	// These tags share a wall-clock second and differ only sub-second, which the
 	// feed must preserve.
-	fakeTags := []*db.RepoTag{
-		{OrgRepoName: "someorg/repo1", TagName: "tag1", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 100000000, time.UTC)},
-		{OrgRepoName: "someorg/repo1", TagName: "tag2", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 200000000, time.UTC)},
-		{OrgRepoName: "someorg/repo1", TagName: "tag3", ModulePath: "stash.somecompany.net/someorg/repo1", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 300000000, time.UTC)},
+	fakeTags := []*db.RepoModuleVersion{
+		{OrgRepoName: "someorg/repo1", Version: "tag1", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 100000000, time.UTC)},
+		{OrgRepoName: "someorg/repo1", Version: "tag2", ModulePath: "github.somecompany.net/someorg/repo1", Created: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 200000000, time.UTC)},
+		{OrgRepoName: "someorg/repo1", Version: "tag3", ModulePath: "stash.somecompany.net/someorg/repo1", Created: time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), IndexedAt: time.Date(2025, 1, 2, 3, 4, 5, 300000000, time.UTC)},
 	}
 
 	for _, tc := range []struct {
 		name           string
 		sinceParam     string
 		limitParam     string
-		tags           []*db.RepoTag
+		tags           []*db.RepoModuleVersion
 		wantStatusCode int
 		wantResponse   string
 	}{

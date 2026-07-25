@@ -35,15 +35,15 @@ func (f *fakeRepoLister) GoRepos(ctx context.Context) ([]string, error) {
 // fakeRepoTagsStore implements repoTagsStore.
 type fakeRepoTagsStore struct {
 	nextReindexRepoTagsWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, err error)
-	storeRepoTags           func(ctx context.Context, repoTags []*db.RepoTag) error
+	storeRepoTags           func(ctx context.Context, repoModuleVersions []*db.RepoModuleVersion) error
 }
 
 func (f *fakeRepoTagsStore) NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (string, bool, error) {
 	return f.nextReindexRepoTagsWork(ctx, reindexTTL, reindexPeriod)
 }
 
-func (f *fakeRepoTagsStore) StoreRepoTags(ctx context.Context, repoTags []*db.RepoTag) error {
-	return f.storeRepoTags(ctx, repoTags)
+func (f *fakeRepoTagsStore) StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*db.RepoModuleVersion) error {
+	return f.storeRepoTags(ctx, repoModuleVersions)
 }
 
 // fakeSCM is an in-memory scm: it serves canned tags, HEAD, module dirs, and

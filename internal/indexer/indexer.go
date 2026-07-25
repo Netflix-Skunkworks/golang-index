@@ -102,7 +102,7 @@ func (ix *AllReposIndexer) IndexAllReposOnce(ctx context.Context) (retryable boo
 // satisfies it.
 type repoTagsStore interface {
 	NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, err error)
-	StoreRepoTags(ctx context.Context, repoTags []*db.RepoTag) error
+	StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*db.RepoModuleVersion) error
 }
 
 // RepoTagsIndexer drains the repo work queue, re-indexing one repo's module
@@ -187,40 +187,40 @@ func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retr
 	}
 
 	logger.Info(fmt.Sprintf("Repo tags re-indexing: got work for repo %s", repoToReindex))
-	repoTags, err := ix.repoTags(ctx, repoToReindex)
+	repoModuleVersions, err := ix.repoModuleVersions(ctx, repoToReindex)
 	if err != nil {
 		return true, true, fmt.Errorf("error fetching repo tags for %s: %v", repoToReindex, err)
 	}
-	if len(repoTags) == 0 {
+	if len(repoModuleVersions) == 0 {
 		return true, false, nil
 	}
 
-	logger.Info(fmt.Sprintf("Repo tags re-indexing: storing %d module versions for repo %s", len(repoTags), repoToReindex))
-	if err := ix.DB.StoreRepoTags(ctx, repoTags); err != nil {
+	logger.Info(fmt.Sprintf("Repo tags re-indexing: storing %d module versions for repo %s", len(repoModuleVersions), repoToReindex))
+	if err := ix.DB.StoreRepoModuleVersions(ctx, repoModuleVersions); err != nil {
 		return true, false, fmt.Errorf("error storing repo tags: %v", err)
 	}
-	logger.Info(fmt.Sprintf("Repo tags re-indexing: stored %d module versions for repo %s", len(repoTags), repoToReindex))
+	logger.Info(fmt.Sprintf("Repo tags re-indexing: stored %d module versions for repo %s", len(repoModuleVersions), repoToReindex))
 	return true, false, nil
 }
 
-// repoTags reads a repo's module versions and shapes them into the DB rows to
+// repoModuleVersions reads a repo's module versions and shapes them into the DB rows to
 // store. The error is a transient GitHub error for the caller to back off on.
-func (ix *RepoTagsIndexer) repoTags(ctx context.Context, orgRepoName string) ([]*db.RepoTag, error) {
+func (ix *RepoTagsIndexer) repoModuleVersions(ctx context.Context, orgRepoName string) ([]*db.RepoModuleVersion, error) {
 	moduleVersions, err := moduleVersionsForRepo(ctx, ix.SCM, ix.DefaultModuleHost, orgRepoName)
 	if err != nil {
 		return nil, err
 	}
 
-	repoTags := make([]*db.RepoTag, 0, len(moduleVersions))
+	repoModuleVersions := make([]*db.RepoModuleVersion, 0, len(moduleVersions))
 	for _, mv := range moduleVersions {
-		repoTags = append(repoTags, &db.RepoTag{
+		repoModuleVersions = append(repoModuleVersions, &db.RepoModuleVersion{
 			OrgRepoName: orgRepoName,
-			TagName:     mv.Version,
+			Version:     mv.Version,
 			ModulePath:  mv.ModulePath,
 			Created:     mv.Created,
 		})
 	}
-	return repoTags, nil
+	return repoModuleVersions, nil
 }
 
 // newGithubBackoff returns a fresh retry backoff for GitHub errors, ranging from

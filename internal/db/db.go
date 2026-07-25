@@ -38,48 +38,50 @@ func NewDB(username, password, host string, port uint16, dbname string) (*DB, er
 	return &DB{db: db}, nil
 }
 
-// A tag for a repo.
-type RepoTag struct {
+// RepoModuleVersion is one version of one module in a repo: a module path at a
+// version, where the version is a git tag or a synthesized pseudo-version.
+type RepoModuleVersion struct {
 	OrgRepoName string
-	TagName     string
+	Version     string
 	ModulePath  string
-	// Created is the git tag's own creation date.
+	// Created is when the version was created: the git tag's date, or the commit
+	// date for a pseudo-version.
 	Created time.Time
-	// IndexedAt is when this index first observed the tag. The /index feed is
+	// IndexedAt is when this index first observed the version. The /index feed is
 	// keyed on this so it behaves like an append-only log. It is assigned by the
-	// DB on insert (column DEFAULT); StoreRepoTags ignores any value set here.
+	// DB on insert (column DEFAULT); StoreRepoModuleVersions ignores any value set here.
 	IndexedAt time.Time
 }
 
 // Fetches repo tags.
-func (d *DB) FetchRepoTags(ctx context.Context, since time.Time, limit int64) ([]*RepoTag, error) {
+func (d *DB) FetchRepoModuleVersions(ctx context.Context, since time.Time, limit int64) ([]*RepoModuleVersion, error) {
 	// Filtered and ordered by indexed_at so consumers can poll forward with
-	// ?since=; see RepoTag.IndexedAt.
+	// ?since=; see RepoModuleVersion.IndexedAt.
 	query := `
-SELECT org_repo_name, tag_name, module_path, created, indexed_at
-FROM repo_tags
+SELECT org_repo_name, version, module_path, created, indexed_at
+FROM repo_module_versions
 WHERE indexed_at >= $1
 ORDER BY indexed_at ASC
 LIMIT $2;`
 
 	rows, err := d.db.QueryContext(ctx, query, since, limit)
 	if err != nil {
-		return nil, fmt.Errorf("FetchRepoTags:\nquery: %s\nerror: %v", query, err)
+		return nil, fmt.Errorf("FetchRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 	defer rows.Close()
-	var repoTags []*RepoTag
+	var repoModuleVersions []*RepoModuleVersion
 	for rows.Next() {
-		var rt RepoTag
-		if err := rows.Scan(&rt.OrgRepoName, &rt.TagName, &rt.ModulePath, &rt.Created, &rt.IndexedAt); err != nil {
-			return nil, fmt.Errorf("FetchRepoTags: %v", err)
+		var rt RepoModuleVersion
+		if err := rows.Scan(&rt.OrgRepoName, &rt.Version, &rt.ModulePath, &rt.Created, &rt.IndexedAt); err != nil {
+			return nil, fmt.Errorf("FetchRepoModuleVersions: %v", err)
 		}
-		repoTags = append(repoTags, &rt)
+		repoModuleVersions = append(repoModuleVersions, &rt)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("FetchRepoTags: %v", err)
+		return nil, fmt.Errorf("FetchRepoModuleVersions: %v", err)
 	}
 
-	return repoTags, nil
+	return repoModuleVersions, nil
 }
 
 // Retrieves from the work queue whether it's time to re-index all repos.
@@ -166,9 +168,9 @@ ON CONFLICT (org_repo_name) DO NOTHING;`, strings.Join(valueStrings, ",\n\t"))
 // WARNING: The given repo tags are treated as authoratative: for each repo that
 // tags are given, any stored tags not in the given list will be deleted. This
 // function SHOULD NOT be provided partial updates.
-func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
-	if len(repoTags) == 0 {
-		return fmt.Errorf("StoreRepoTags called with 0 repo tags")
+func (d *DB) StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*RepoModuleVersion) error {
+	if len(repoModuleVersions) == 0 {
+		return fmt.Errorf("StoreRepoModuleVersions called with 0 repo tags")
 	}
 
 	// Number of fields in the INSERT below, used to number its placeholders.
@@ -177,19 +179,19 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 	var valueStrings []string
 	var valueArgs []any
 	orgRepoNames := make(map[string]bool)
-	// keepRepos/keepTags zip the authoritative incoming (org_repo_name, tag_name)
+	// keepRepos/keepVersions zip the authoritative incoming (org_repo_name, version)
 	// pairs into parallel arrays for the delete-stale anti-join below.
-	keepRepos := make([]string, len(repoTags))
-	keepTags := make([]string, len(repoTags))
-	for i, rt := range repoTags {
+	keepRepos := make([]string, len(repoModuleVersions))
+	keepVersions := make([]string, len(repoModuleVersions))
+	for i, rt := range repoModuleVersions {
 		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", fieldCount*i+1, fieldCount*i+2, fieldCount*i+3, fieldCount*i+4))
 		valueArgs = append(valueArgs, rt.OrgRepoName)
-		valueArgs = append(valueArgs, rt.TagName)
+		valueArgs = append(valueArgs, rt.Version)
 		valueArgs = append(valueArgs, rt.ModulePath)
 		valueArgs = append(valueArgs, rt.Created.Format(time.RFC3339))
 		orgRepoNames[rt.OrgRepoName] = true
 		keepRepos[i] = rt.OrgRepoName
-		keepTags[i] = rt.TagName
+		keepVersions[i] = rt.Version
 	}
 	repoList := make([]string, 0, len(orgRepoNames))
 	for orgRepoName := range orgRepoNames {
@@ -198,7 +200,7 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("StoreRepoTags: %v", err)
+		return fmt.Errorf("StoreRepoModuleVersions: %v", err)
 	}
 	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
@@ -208,25 +210,25 @@ func (d *DB) StoreRepoTags(ctx context.Context, repoTags []*RepoTag) error {
 	// indexed_at persists across re-indexing; new tags get a fresh indexed_at
 	// from the column DEFAULT below.
 	query := `
-DELETE FROM repo_tags rt
+DELETE FROM repo_module_versions rt
 WHERE rt.org_repo_name = ANY($1)
 AND NOT EXISTS (
     SELECT 1
-    FROM unnest($2::text[], $3::text[]) AS keep(org_repo_name, tag_name)
+    FROM unnest($2::text[], $3::text[]) AS keep(org_repo_name, version)
     WHERE keep.org_repo_name = rt.org_repo_name
-    AND keep.tag_name = rt.tag_name
+    AND keep.version = rt.version
 );`
-	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepTags)); err != nil {
-		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)
+	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepVersions)); err != nil {
+		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 
 	query = fmt.Sprintf(`
-INSERT INTO repo_tags (org_repo_name, tag_name, module_path, created)
+INSERT INTO repo_module_versions (org_repo_name, version, module_path, created)
 VALUES %s
-ON CONFLICT (org_repo_name, tag_name) DO UPDATE
+ON CONFLICT (org_repo_name, version) DO UPDATE
 SET created = EXCLUDED.created;`, strings.Join(valueStrings, ",\n"))
 	if _, err := tx.ExecContext(ctx, query, valueArgs...); err != nil {
-		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)
+		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 
 	query = `
@@ -234,11 +236,11 @@ UPDATE repos
 SET indexing_finished = NOW()
 WHERE org_repo_name = ANY($1);`
 	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList)); err != nil {
-		return fmt.Errorf("StoreRepoTags:\nquery: %s\nerror: %v", query, err)
+		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("StoreRepoTags: %v", err)
+		return fmt.Errorf("StoreRepoModuleVersions: %v", err)
 	}
 
 	return nil

@@ -70,8 +70,8 @@ func setupDB(t *testing.T) (*db.DB, *sql.DB) {
 func resetTables(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repo_tags;"); err != nil {
-		t.Fatalf("resetTables: error dropping repo_tags table: %v", err)
+	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repo_module_versions;"); err != nil {
+		t.Fatalf("resetTables: error dropping repo_module_versions table: %v", err)
 	}
 	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repos;"); err != nil {
 		t.Fatalf("resetTables: error dropping repos table: %v", err)
@@ -96,8 +96,8 @@ func resetTables(t *testing.T, db *sql.DB) {
 	}
 }
 
-// Returns a map of orgRepoName to RepoTag. Includes repos which have no tags.
-func repoTags(t *testing.T, sdb *sql.DB) map[string][]*db.RepoTag {
+// Returns a map of orgRepoName to RepoModuleVersion. Includes repos which have no tags.
+func repoModuleVersions(t *testing.T, sdb *sql.DB) map[string][]*db.RepoModuleVersion {
 	t.Helper()
 
 	query := `
@@ -105,64 +105,64 @@ SELECT org_repo_name
 FROM repos`
 	rows, err := sdb.QueryContext(t.Context(), query)
 	if err != nil {
-		t.Fatalf("repoTags: error fetching repos:\nquery: %s\nerror: %v", query, err)
+		t.Fatalf("repoModuleVersions: error fetching repos:\nquery: %s\nerror: %v", query, err)
 	}
 	defer rows.Close()
-	repoTags := make(map[string][]*db.RepoTag)
+	repoModuleVersions := make(map[string][]*db.RepoModuleVersion)
 	for rows.Next() {
 		var r string
 		if err := rows.Scan(&r); err != nil {
-			t.Fatalf("repoTags: %v", err)
+			t.Fatalf("repoModuleVersions: %v", err)
 		}
-		repoTags[r] = nil
+		repoModuleVersions[r] = nil
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("repoTags: %v", err)
+		t.Fatalf("repoModuleVersions: %v", err)
 	}
 
 	query = `
-SELECT org_repo_name, tag_name, module_path, created
-FROM repo_tags
+SELECT org_repo_name, version, module_path, created
+FROM repo_module_versions
 ORDER BY created DESC`
 	rows, err = sdb.QueryContext(t.Context(), query)
 	if err != nil {
-		t.Fatalf("repoTags: error fetching repo tags:\nquery: %s\nerror: %v", query, err)
+		t.Fatalf("repoModuleVersions: error fetching repo tags:\nquery: %s\nerror: %v", query, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var rt db.RepoTag
-		if err := rows.Scan(&rt.OrgRepoName, &rt.TagName, &rt.ModulePath, &rt.Created); err != nil {
-			t.Fatalf("repoTags: %v", err)
+		var rt db.RepoModuleVersion
+		if err := rows.Scan(&rt.OrgRepoName, &rt.Version, &rt.ModulePath, &rt.Created); err != nil {
+			t.Fatalf("repoModuleVersions: %v", err)
 		}
-		repoTags[rt.OrgRepoName] = append(repoTags[rt.OrgRepoName], &rt)
+		repoModuleVersions[rt.OrgRepoName] = append(repoModuleVersions[rt.OrgRepoName], &rt)
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("repoTags: %v", err)
+		t.Fatalf("repoModuleVersions: %v", err)
 	}
 
-	return repoTags
+	return repoModuleVersions
 }
 
-func populateRepoTags(t *testing.T, db *sql.DB, repoTags []*db.RepoTag) {
+func populateRepoModuleVersions(t *testing.T, db *sql.DB, repoModuleVersions []*db.RepoModuleVersion) {
 	t.Helper()
 
-	for _, rt := range repoTags {
+	for _, rt := range repoModuleVersions {
 		query := fmt.Sprintf(`
 INSERT INTO repos (org_repo_name)
 VALUES ('%s')
 ON CONFLICT (org_repo_name) DO NOTHING;`, rt.OrgRepoName)
 		if _, err := db.ExecContext(t.Context(), query); err != nil {
-			t.Fatalf("populateRepoTags: error inserting into repos table:\nquery: %s\nerror: %v", query, err)
+			t.Fatalf("populateRepoModuleVersions: error inserting into repos table:\nquery: %s\nerror: %v", query, err)
 		}
 
 		query = fmt.Sprintf(`
-INSERT INTO repo_tags (org_repo_name, tag_name, module_path, created, indexed_at)
+INSERT INTO repo_module_versions (org_repo_name, version, module_path, created, indexed_at)
 VALUES ('%s', '%s', '%s', TIMESTAMP WITH TIME ZONE '%s', TIMESTAMP WITH TIME ZONE '%s')
-ON CONFLICT (org_repo_name, tag_name) DO UPDATE
+ON CONFLICT (org_repo_name, version) DO UPDATE
 SET created = EXCLUDED.created, indexed_at = EXCLUDED.indexed_at;`,
-			rt.OrgRepoName, rt.TagName, rt.ModulePath, rt.Created.Format(time.RFC3339), rt.IndexedAt.Format(time.RFC3339))
+			rt.OrgRepoName, rt.Version, rt.ModulePath, rt.Created.Format(time.RFC3339), rt.IndexedAt.Format(time.RFC3339))
 		if _, err := db.ExecContext(t.Context(), query); err != nil {
-			t.Fatalf("populateRepoTags: error inserting into repo_tags table:\nquery: %s\nerror:%v", query, err)
+			t.Fatalf("populateRepoModuleVersions: error inserting into repo_module_versions table:\nquery: %s\nerror:%v", query, err)
 		}
 	}
 }
