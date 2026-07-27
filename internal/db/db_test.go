@@ -15,7 +15,10 @@ func TestFetchRepoModuleVersions(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 
-	now := time.Now()
+	// UTC so the ?since= bound below and the stored indexed_at (a
+	// timestamp-without-tz column holding UTC) compare correctly regardless of the
+	// machine's local timezone.
+	now := time.Now().UTC()
 	// Ordered by IndexedAt ASC, as FetchRepoModuleVersions returns. The out-of-order Created
 	// dates ensure the ordering can only come from IndexedAt.
 	allTags := []*db.RepoModuleVersion{
