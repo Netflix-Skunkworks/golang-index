@@ -14,7 +14,6 @@ import (
 	"github.com/Netflix-Skunkworks/golang-index/internal/db"
 	"github.com/Netflix-Skunkworks/golang-index/internal/github"
 	"github.com/Netflix-Skunkworks/golang-index/internal/indexer"
-	"github.com/shurcooL/githubv4"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -69,9 +68,7 @@ func main() {
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	graphqlClient := githubv4.NewEnterpriseClient(baseURL+"/api/graphql", httpClient)
-
-	githubSCM := github.NewGithubSCM(graphqlClient, baseURL, *githubHostName, httpClient)
+	githubSCM := github.NewEnterpriseSCM(baseURL, *githubHostName, httpClient)
 
 	server := newServer(*port, idb, *githubHostName)
 

@@ -1,0 +1,12 @@
+# Every tag is rejected: docs/latest isn't semver, v1 isn't canonical, and v2.0.0
+# fails the major-version check (the go.mod path has no /v2). With zero tag
+# versions the repo falls through to a HEAD pseudo-version.
+repo someorg/unqualified
+head cc00112233445566778899aabbccddeeff001122 2026-03-04T05:06:07Z
+tag docs/latest 2025-01-01T00:00:00Z
+tag v1 2025-01-02T00:00:00Z
+tag v2.0.0 2025-01-03T00:00:00Z
+-- someorg/unqualified/go.mod --
+module go.example.com/unqualified
+-- want --
+someorg/unqualified go.example.com/unqualified v0.0.0-20260304050607-cc0011223344 2026-03-04T05:06:07Z

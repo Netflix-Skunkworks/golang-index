@@ -12,12 +12,14 @@ require (
 	golang.org/x/mod v0.21.0
 	golang.org/x/oauth2 v0.27.0
 	golang.org/x/sync v0.13.0
+	golang.org/x/tools v0.26.0
 )
 
 require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
+	github.com/stretchr/testify v1.10.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 )
