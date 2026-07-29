@@ -1,14 +1,14 @@
-# Only the root and internal/agent modules are real; the rest live under dirs the
-# go tool ignores (vendor, testdata, dot- and underscore-prefixed), so ModuleDirs
-# must skip them. internal/ is NOT ignored, so it must be kept.
+# The indexer skips vendor/, testdata/, and dot- or underscore-prefixed dirs, but
+# not internal/, so internal/agent is kept. Skipping testdata/ and _build/ is our
+# policy, borrowed from how the go tool ignores those dirs when it loads packages:
+# a module under either one is genuinely fetchable. Only .config could never be a
+# module, since no module path element may start with a dot.
 repo someorg/exclusions
 head bbccddeeff00112233445566778899aabbccddee 2026-02-03T04:05:06Z
 -- someorg/exclusions/go.mod --
 module go.example.com/excl
 -- someorg/exclusions/internal/agent/go.mod --
 module go.example.com/excl/internal/agent
--- someorg/exclusions/vendor/go.mod --
-module third.party/vendored
 -- someorg/exclusions/vendor/foo/go.mod --
 module third.party/foo
 -- someorg/exclusions/testdata/go.mod --
@@ -16,9 +16,9 @@ module go.example.com/excl/testdata
 -- someorg/exclusions/pkg/testdata/go.mod --
 module go.example.com/excl/pkg/testdata
 -- someorg/exclusions/.config/go.mod --
-module go.example.com/excl/dotdir
+module go.example.com/excl/.config
 -- someorg/exclusions/_build/go.mod --
-module go.example.com/excl/underdir
+module go.example.com/excl/_build
 -- want --
 someorg/exclusions go.example.com/excl v0.0.0-20260203040506-bbccddeeff00 2026-02-03T04:05:06Z
 someorg/exclusions go.example.com/excl/internal/agent v0.0.0-20260203040506-bbccddeeff00 2026-02-03T04:05:06Z

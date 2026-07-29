@@ -1,5 +1,5 @@
-# The plain case: one root module with two semver tags, one version each, and a
-# Created taken from the tag date.
+# The baseline case: each semver tag becomes one version, with Created taken
+# from the tag's date rather than from the head commit.
 repo someorg/tagged
 head 1111111111111111111111111111111111111111 2026-06-01T00:00:00Z
 tag v1.0.0 2025-01-02T03:04:05Z

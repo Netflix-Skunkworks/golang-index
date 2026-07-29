@@ -1,0 +1,12 @@
+# A +meta tag is not a version: canonicalization strips the build metadata, so
+# the tag no longer equals its canonical form. But it is a valid pseudo-version
+# base, so HEAD gets vX.Y.(Z+1)-0.<date>-<rev>, not v0.0.0-<date>-<rev>, per
+# https://go.dev/ref/mod#pseudo-versions. etcd tags this way: v3.2.0+git.
+skip mod.PseudoVersion always passes an empty base version, so it emits v0.0.0- rather than bumping the patch of the nearest ancestor tag
+repo someorg/buildmeta
+head dddd111111111111111111111111111111111111 2026-03-04T05:06:07Z
+tag v1.2.3+meta 2025-01-05T00:00:00Z
+-- someorg/buildmeta/go.mod --
+module go.example.com/buildmeta
+-- want --
+someorg/buildmeta go.example.com/buildmeta v1.2.4-0.20260304050607-dddd11111111 2026-03-04T05:06:07Z

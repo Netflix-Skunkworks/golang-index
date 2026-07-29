@@ -1,5 +1,5 @@
-# A go.mod with no module line yields no module path, so the repo produces no
-# versions — without breaking the rest of the pipeline.
+# No module line in go.mod means no module path, so this repo yields no
+# versions rather than an error. modulelessgomodtagged.txtar adds a tag.
 repo someorg/nomodule
 head ff00112233445566778899aabbccddeeff001122 2026-06-07T08:09:10Z
 -- someorg/nomodule/go.mod --

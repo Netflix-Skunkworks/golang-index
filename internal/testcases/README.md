@@ -55,6 +55,26 @@ goes wherever it reads best.
 | `tag` | name, RFC 3339 date | A git tag and its date. Subdirectory tags (`tracing/v2.0.0`) are fine. |
 | `untag` | name | Removes a tag. Only useful in a `cycle` section. |
 | `cycle` | — | Splits the block: everything after it is applied between the two index cycles. |
+| `skip` | reason | Reports the case as skipped instead of running it. |
+
+`repo`, `head`, `tag`, and `untag` apply to a repo; `cycle` and `skip` apply to the
+whole case.
+
+### `skip`
+
+A skipped fixture still has to parse, so its `want` rows keep describing what the
+case should produce — the indexer just isn't asked yet. Use it for a case the
+indexer does not handle, with the reason as the argument:
+
+```
+skip resolving a subdir tag reads only <subdir>/go.mod, never <subdir>/vN/go.mod
+```
+
+The reason is what `go test -v` prints, so make it say what is missing rather than
+that something fails. Six fixtures are skipped today, each for a divergence from
+the module system that is documented in its comment: `buildmetadatatag`,
+`incompatible`, `majorsubdironly`, `modulelessgomodtagged`, `nomodulesathead`, and
+`subdirmajorversions`.
 
 ### The files: repo trees
 
@@ -76,8 +96,15 @@ module go.example.com/thing
 That is how a fixture models a file that changed between refs — a root `go.mod`
 whose module path gained a `/v2` suffix, say, where the older tags still point at
 commits that predate the bump (`majortagversions.txtar`). The ref must be a tag or
-head the fixture declares, and, since it sits inside the `<org>/<repo>` segment,
-it cannot contain a slash — enough for root tags, which is where this comes up.
+head the fixture declares; a typo is a parse error rather than an override nothing
+reads. Slashed refs work, since the ref is matched against the declared ones
+longest-first — `someorg/thing@kafka/v3.0.0/kafka/go.mod` is how a subdirectory
+module's tag gets its own content (`majorsuffixnosubdir.txtar`).
+
+Note the override is additive: it cannot model a file being *deleted* at HEAD. A
+fixture like `staletagsubdir.txtar` therefore reads as "this module exists only at
+that tag," which is close enough, since a tag's module is resolved by reading its
+own ref rather than by listing HEAD.
 
 ### The files: `want` and `want.2`
 

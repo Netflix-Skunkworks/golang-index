@@ -38,6 +38,9 @@ func TestIndexing(t *testing.T) {
 	for _, path := range paths {
 		t.Run(strings.TrimSuffix(filepath.Base(path), ".txtar"), func(t *testing.T) {
 			f := loadFixture(t, path)
+			if f.skip != "" {
+				t.Skip(f.skip)
+			}
 			h := newHarness(t, f.repoList()...)
 
 			h.indexAll(t)

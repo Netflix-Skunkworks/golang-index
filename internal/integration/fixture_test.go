@@ -31,6 +31,8 @@ type fixture struct {
 	// wantAfterUpdate is the want.2 file, or want again for an archive with no
 	// cycle section, where nothing changes between the cycles.
 	wantAfterUpdate []row
+	// skip is the reason from a skip directive, empty when the archive has none.
+	skip string
 }
 
 // row is one row of repo_module_versions in the form the want files use:
@@ -85,6 +87,11 @@ func parseFixture(archive []byte) (*fixture, error) {
 	f := &fixture{repos: map[string]*githubfake.Repo{}}
 
 	setup, update, hasCycle := splitCycle(string(a.Comment))
+	skip, setup, err := takeSkip(setup)
+	if err != nil {
+		return nil, err
+	}
+	f.skip = skip
 	if err := f.applyDirectives(setup, true); err != nil {
 		return nil, err
 	}
@@ -122,6 +129,27 @@ func parseFixture(archive []byte) (*fixture, error) {
 		f.wantAfterUpdate = f.want
 	}
 	return f, nil
+}
+
+// takeSkip pulls a "skip <reason>" directive out of a directive block, returning
+// the reason and the remaining lines. It is a fixture-level directive rather than
+// a per-repo one, so it is handled here instead of in applyDirectives.
+func takeSkip(lines []string) (reason string, rest []string, _ error) {
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "skip" {
+			rest = append(rest, line)
+			continue
+		}
+		if len(fields) == 1 {
+			return "", nil, fmt.Errorf("%q: skip takes a reason", line)
+		}
+		if reason != "" {
+			return "", nil, fmt.Errorf("%q: archive skips twice", line)
+		}
+		reason = strings.Join(fields[1:], " ")
+	}
+	return reason, rest, nil
 }
 
 // splitCycle divides an archive's directive block at its "cycle" line into the
@@ -224,39 +252,57 @@ func (f *fixture) selectRepo(name string, declare bool) (*githubfake.Repo, error
 // suffix on the repo ("someorg/thing@v1.0.0/go.mod") makes it the content at that
 // ref alone, which is how a fixture models a file that changed between refs.
 func (f *fixture) addFile(path string, data []byte) error {
-	org, rest, ok := strings.Cut(path, "/")
-	repoName, rel, ok2 := strings.Cut(rest, "/")
-	if !ok || !ok2 {
-		return fmt.Errorf("path is not <org>/<repo>[@<ref>]/<path within the repo>")
-	}
-	name, ref, atRef := strings.Cut(repoName, "@")
-	repo, ok := f.repos[org+"/"+name]
-	if !ok {
-		return fmt.Errorf("no repo %q is declared", org+"/"+name)
-	}
+	name, tail, atRef := strings.Cut(path, "@")
 	if !atRef {
+		org, rest, ok := strings.Cut(path, "/")
+		repoName, rel, ok2 := strings.Cut(rest, "/")
+		if !ok || !ok2 {
+			return fmt.Errorf("path is not <org>/<repo>[@<ref>]/<path within the repo>")
+		}
+		repo, ok := f.repos[org+"/"+repoName]
+		if !ok {
+			return fmt.Errorf("no repo %q is declared", org+"/"+repoName)
+		}
 		repo.Files[rel] = data
 		return nil
 	}
-	if !declaresRef(repo, ref) {
-		return fmt.Errorf("repo %q has no tag or head %q", repo.Name, ref)
+
+	repo, ok := f.repos[name]
+	if !ok {
+		return fmt.Errorf("no repo %q is declared", name)
 	}
-	if repo.FilesAtRef == nil {
-		repo.FilesAtRef = map[string]map[string][]byte{}
+	// A ref can contain slashes (the tag "tracing/v2.0.0"), so match the repo's own
+	// refs rather than guessing where the ref ends and the path begins. A ref that
+	// matches nothing is a typo, not an override no one reads.
+	for _, ref := range declaredRefs(repo) {
+		rel, ok := strings.CutPrefix(tail, ref+"/")
+		if !ok {
+			continue
+		}
+		if repo.FilesAtRef == nil {
+			repo.FilesAtRef = map[string]map[string][]byte{}
+		}
+		if repo.FilesAtRef[ref] == nil {
+			repo.FilesAtRef[ref] = map[string][]byte{}
+		}
+		repo.FilesAtRef[ref][rel] = data
+		return nil
 	}
-	if repo.FilesAtRef[ref] == nil {
-		repo.FilesAtRef[ref] = map[string][]byte{}
-	}
-	repo.FilesAtRef[ref][rel] = data
-	return nil
+	return fmt.Errorf("repo %q has no tag or head starting %q", name, tail)
 }
 
-// declaresRef reports whether ref is one the repo can serve, so that a typo in an
-// "@ref" path is an error rather than an override nothing reads.
-func declaresRef(repo *githubfake.Repo, ref string) bool {
-	return ref == repo.HeadOID || slices.ContainsFunc(repo.Tags, func(tag githubfake.Tag) bool {
-		return tag.Name == ref
-	})
+// declaredRefs lists the refs a repo can serve, longest first so that a ref which
+// is a prefix of another cannot shadow it.
+func declaredRefs(repo *githubfake.Repo) []string {
+	refs := make([]string, 0, len(repo.Tags)+1)
+	if repo.HeadOID != "" {
+		refs = append(refs, repo.HeadOID)
+	}
+	for _, tag := range repo.Tags {
+		refs = append(refs, tag.Name)
+	}
+	slices.SortFunc(refs, func(a, b string) int { return len(b) - len(a) })
+	return refs
 }
 
 // repoList returns the fixture's repos in name order.

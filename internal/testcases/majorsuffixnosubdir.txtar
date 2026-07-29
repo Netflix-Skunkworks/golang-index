@@ -1,0 +1,15 @@
+# A subdir module's v2+ without a major-version subdirectory: kafka/go.mod
+# carries the /v4 suffix in its module path, so the suffix can only come from
+# the go.mod. The v3 tag points at a commit where that file said /v3, so
+# reading the go.mod at HEAD instead of at the tag would reject it.
+repo someorg/stew
+head 8888888888888888888888888888888888888888 2026-06-01T00:00:00Z
+tag kafka/v3.0.0 2025-01-08T00:00:00Z
+tag kafka/v4.0.1-rc.1 2025-02-08T00:00:00Z
+-- someorg/stew/kafka/go.mod --
+module go.example.com/stew/kafka/v4
+-- someorg/stew@kafka/v3.0.0/kafka/go.mod --
+module go.example.com/stew/kafka/v3
+-- want --
+someorg/stew go.example.com/stew/kafka/v3 v3.0.0 2025-01-08T00:00:00Z
+someorg/stew go.example.com/stew/kafka/v4 v4.0.1-rc.1 2025-02-08T00:00:00Z

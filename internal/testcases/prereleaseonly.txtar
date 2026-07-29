@@ -1,0 +1,14 @@
+# A module released only as prereleases. Prerelease tags are canonical semver,
+# so they are published versions and must not be filtered out: a module that
+# never cut a final release would be invisible, and since go list -m -versions
+# reports prereleases, filtering would leave @latest unresolvable too. Repos
+# released only by CI look like this, tagging every build -rc.N.
+repo someorg/skywarp
+head bbbb111111111111111111111111111111111111 2026-06-01T00:00:00Z
+tag pkg/v0.0.1-rc.1 2025-01-10T00:00:00Z
+tag pkg/v0.0.1-rc.2 2025-02-10T00:00:00Z
+-- someorg/skywarp/pkg/go.mod --
+module go.example.com/skywarp/pkg
+-- want --
+someorg/skywarp go.example.com/skywarp/pkg v0.0.1-rc.1 2025-01-10T00:00:00Z
+someorg/skywarp go.example.com/skywarp/pkg v0.0.1-rc.2 2025-02-10T00:00:00Z

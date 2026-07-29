@@ -1,11 +1,15 @@
-# Every tag is rejected: docs/latest isn't semver, v1 isn't canonical, and v2.0.0
-# fails the major-version check (the go.mod path has no /v2). With zero tag
-# versions the repo falls through to a HEAD pseudo-version.
+# No tag survives: docs/latest is not semver, v1 and 0.0.24 are not canonical
+# (no patch, no v), and _gheMigrationPR-1 is not a version at all. v2.0.0 is
+# canonical but the go.mod path has no /v2. With no tag versions the repo falls
+# back to a HEAD pseudo-version. Bare-numeric and _gheMigrationPR- tags are what
+# most non-semver tags on GHE repos look like.
 repo someorg/unqualified
 head cc00112233445566778899aabbccddeeff001122 2026-03-04T05:06:07Z
 tag docs/latest 2025-01-01T00:00:00Z
 tag v1 2025-01-02T00:00:00Z
 tag v2.0.0 2025-01-03T00:00:00Z
+tag 0.0.24 2025-01-04T00:00:00Z
+tag _gheMigrationPR-1 2025-01-06T00:00:00Z
 -- someorg/unqualified/go.mod --
 module go.example.com/unqualified
 -- want --

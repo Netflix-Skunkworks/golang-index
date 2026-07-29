@@ -1,5 +1,6 @@
-# No go.mod anywhere, so the tag's module path falls back to the repo URL built
-# from the indexer's DefaultModuleHost, which is the fake's host.
+# No go.mod anywhere, but the v1 tag still names a module: a pre-modules repo
+# that kept cutting releases. Its path is the repo URL under DefaultModuleHost,
+# which the fake sets to github.fake.test.
 repo someorg/nomod
 head ee00112233445566778899aabbccddeeff001122 2026-05-06T07:08:09Z
 tag v1.0.0 2025-01-02T03:04:05Z
