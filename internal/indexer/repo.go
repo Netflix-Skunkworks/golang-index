@@ -45,7 +45,7 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName strin
 
 		modulePath := mod.RepoModulePath(host, orgRepoName, subdir)
 
-		declaredPath, hasGoMod, err := declaredModulePath(ctx, scm, orgRepoName, t.Name, subdir)
+		declaredPath, hasGoMod, err := modulePathForTag(ctx, scm, orgRepoName, t.Name, subdir, version)
 		switch {
 		case err != nil:
 			slog.Error(fmt.Sprintf("Error getting go.mod file for %s (tag %q): %v; defaulting to GitHub URL for module path", orgRepoName, t.Name, err))
@@ -141,6 +141,39 @@ func headPseudoVersion(orgRepoName, modulePath, oid string, committedAt time.Tim
 		Created:    committedAt,
 		ModulePath: modulePath,
 	}
+}
+
+// modulePathForTag returns the module path declared for a tag's version. A v2+
+// module may keep its go.mod either in the subdir its tags are prefixed with or in
+// a major-version subdirectory below it, so when the subdir's own go.mod doesn't
+// account for the version, the major-version subdirectory is read too. Keeping the
+// subdir first means only the rarer layout pays for a second read.
+//
+// The results are declaredModulePath's, for whichever directory answered. A go.mod
+// that doesn't match the version reads as if it weren't there. A version both
+// directories account for takes the subdir's path; the go tool rejects such a repo
+// outright, so neither choice would be fetchable anyway.
+func modulePathForTag(ctx context.Context, scm scm, orgRepoName, tag, subdir, version string) (modulePath string, hasGoMod bool, err error) {
+	modulePath, hasGoMod, err = declaredModulePath(ctx, scm, orgRepoName, tag, subdir)
+	if err != nil {
+		return "", false, err
+	}
+	if hasGoMod && mod.Check(modulePath, version) == nil {
+		return modulePath, hasGoMod, nil
+	}
+
+	majorSubdir := mod.MajorSubdir(subdir, version)
+	if majorSubdir == "" {
+		return modulePath, hasGoMod, nil
+	}
+	majorPath, majorHasGoMod, err := declaredModulePath(ctx, scm, orgRepoName, tag, majorSubdir)
+	if err != nil {
+		return "", false, err
+	}
+	if majorHasGoMod && mod.Check(majorPath, version) == nil {
+		return majorPath, true, nil
+	}
+	return modulePath, hasGoMod, nil
 }
 
 // declaredModulePath returns the module path declared in the go.mod at subdir

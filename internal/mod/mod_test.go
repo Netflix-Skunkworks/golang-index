@@ -131,3 +131,28 @@ func TestIncompatibleVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestMajorSubdir(t *testing.T) {
+	tests := []struct {
+		name    string
+		subdir  string
+		version string
+		want    string
+	}{
+		{name: "v0 has none", version: "v0.5.0", want: ""},
+		{name: "v1 has none", version: "v1.2.3", want: ""},
+		{name: "v2 at the root", version: "v2.0.0", want: "v2"},
+		{name: "v2 under a subdir", subdir: "tracing", version: "v2.0.0", want: "tracing/v2"},
+		{name: "v3 under a nested subdir", subdir: "client/pkg", version: "v3.5.0", want: "client/pkg/v3"},
+		{name: "prerelease still counts", subdir: "kafka", version: "v4.0.1-rc.1", want: "kafka/v4"},
+		{name: "not a version has none", subdir: "tracing", version: "nope", want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MajorSubdir(tc.subdir, tc.version); got != tc.want {
+				t.Errorf("MajorSubdir(%q, %q) = %q, want %q", tc.subdir, tc.version, got, tc.want)
+			}
+		})
+	}
+}

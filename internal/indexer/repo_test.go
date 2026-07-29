@@ -155,6 +155,43 @@ func TestModuleVersionsForRepo_SkipsMajorVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestModuleVersionsForRepo_MajorVersionSubdirectory(t *testing.T) {
+	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+	// tracing/ holds the v0/v1 module and tracing/v2/ holds its v2, so the tag
+	// prefix is "tracing" for both and only the version says which dir to read.
+	scm := &fakeSCM{
+		tags: []github.Tag{
+			{Name: "tracing/v0.5.0", Date: date},
+			{Name: "tracing/v2.0.0", Date: date},
+			{Name: "v3.0.0", Date: date},
+			{Name: "auth/v2.0.0", Date: date},
+		},
+		goMods: map[goModKey]string{
+			{ref: "tracing/v0.5.0", subdir: "tracing"}:    "module go.example.com/monorepo/tracing\n",
+			{ref: "tracing/v2.0.0", subdir: "tracing"}:    "module go.example.com/monorepo/tracing\n",
+			{ref: "tracing/v2.0.0", subdir: "tracing/v2"}: "module go.example.com/monorepo/tracing/v2\n",
+			// The same layout at the repo root, where the major dir is just "v3".
+			{ref: "v3.0.0", subdir: ""}:   "module go.example.com/monorepo\n",
+			{ref: "v3.0.0", subdir: "v3"}: "module go.example.com/monorepo/v3\n",
+			// A major dir whose go.mod forgot the suffix reads as if it weren't
+			// there, leaving the subdir's own go.mod to account for the version.
+			{ref: "auth/v2.0.0", subdir: "auth"}:    "module go.example.com/monorepo/auth/v2\n",
+			{ref: "auth/v2.0.0", subdir: "auth/v2"}: "module go.example.com/monorepo/auth\n",
+		},
+	}
+
+	want := []*mod.ModuleVersion{
+		{Version: "v0.5.0", Created: date, ModulePath: "go.example.com/monorepo/tracing"},
+		{Version: "v2.0.0", Created: date, ModulePath: "go.example.com/monorepo/tracing/v2"},
+		{Version: "v3.0.0", Created: date, ModulePath: "go.example.com/monorepo/v3"},
+		{Version: "v2.0.0", Created: date, ModulePath: "go.example.com/monorepo/auth/v2"},
+	}
+
+	if diff := cmp.Diff(want, versionsForRepo(t, scm)); diff != "" {
+		t.Errorf("moduleVersionsForRepo mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestModuleVersionsForRepo_IncompatibleWhenRepoHasNoGoMod(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
 	// A pre-modules repo that kept releasing past v1.

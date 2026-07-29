@@ -2,7 +2,6 @@
 # go.mod in client/ itself. Both tags carry the prefix "client", so only the
 # tag's major version says whether client/v2/ or client/v3/ serves it. This is
 # go.etcd.io/etcd's client layout.
-skip resolving a subdir tag reads only <subdir>/go.mod, never <subdir>/vN/go.mod
 repo someorg/etcdish
 head 6666666666666666666666666666666666666666 2026-06-01T00:00:00Z
 tag client/v2.305.0 2025-04-05T00:00:00Z
