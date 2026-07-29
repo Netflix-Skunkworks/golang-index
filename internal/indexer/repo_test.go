@@ -212,6 +212,35 @@ func TestModuleVersionsForRepo_IncompatibleWhenRepoHasNoGoMod(t *testing.T) {
 	}
 }
 
+func TestModuleVersionsForRepo_PseudoVersionsBuildOnTags(t *testing.T) {
+	commitDate := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	const oid = "abcdef0123456789abcdef0123456789abcdef01"
+	// Build metadata makes these tags no versions of their own, so the repo falls
+	// back to HEAD, but each still bases its own module's pseudo-version.
+	scm := &fakeSCM{
+		headOID: oid,
+		headAt:  commitDate,
+		tags: []github.Tag{
+			{Name: "v1.2.3+meta", Date: commitDate},
+			{Name: "tracing/v0.4.0+meta", Date: commitDate},
+		},
+		moduleDirs: []string{"", "tracing"},
+		goMods: map[goModKey]string{
+			{ref: oid, subdir: ""}:        "module go.example.com/thing\n",
+			{ref: oid, subdir: "tracing"}: "module go.example.com/thing/tracing\n",
+		},
+	}
+
+	want := []*mod.ModuleVersion{
+		{Version: "v1.2.4-0.20260102030405-abcdef012345", Created: commitDate, ModulePath: "go.example.com/thing"},
+		{Version: "v0.4.1-0.20260102030405-abcdef012345", Created: commitDate, ModulePath: "go.example.com/thing/tracing"},
+	}
+
+	if diff := cmp.Diff(want, versionsForRepo(t, scm)); diff != "" {
+		t.Errorf("moduleVersionsForRepo mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestModuleVersionsForRepo_PseudoVersionAtRepoURLWhenNoGoMod(t *testing.T) {
 	commitDate := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	const oid = "abcdef0123456789abcdef0123456789abcdef01"

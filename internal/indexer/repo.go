@@ -27,8 +27,9 @@ type scm interface {
 // tags, skipping tags that don't resolve to one. A version is not always identical
 // to its tag: a v2+ tag on a repo with no go.mod is recorded as +incompatible. A
 // repo with no versions from tags falls back to pseudo-versions synthesized from
-// HEAD, one per module. host is the module host used to build repo-derived module
-// paths (e.g. "github.mycompany.net").
+// HEAD, one per module, each built on the highest tag that names it: tags that
+// yield no version still set where those pseudo-versions sort. host is the module
+// host used to build repo-derived module paths (e.g. "github.mycompany.net").
 func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName string) ([]*mod.ModuleVersion, error) {
 	tags, err := scm.RepoTags(ctx, orgRepoName)
 	if err != nil {
@@ -72,7 +73,7 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName strin
 	}
 
 	if len(versions) == 0 {
-		pseudos, err := headPseudoVersions(ctx, scm, host, orgRepoName)
+		pseudos, err := headPseudoVersions(ctx, scm, host, orgRepoName, tagNames(tags))
 		if err != nil {
 			return nil, err
 		}
@@ -83,12 +84,13 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName strin
 }
 
 // headPseudoVersions synthesizes a pseudo-version for every module in the repo
-// at HEAD, used when a repo has no semver tags. Multi-module repos get one per
+// at HEAD, used when a repo has no semver tags. tags are the repo's tag names,
+// which set what each pseudo-version builds on. Multi-module repos get one per
 // module, not just the root. A repo with no module directory at HEAD still gets
 // one, at the repo URL, which is the path a tag on such a repo resolves to. It
 // returns nil for a repo with no commit, and skips any module whose go.mod
 // declares no path or whose pseudo-version isn't valid for that path.
-func headPseudoVersions(ctx context.Context, scm scm, host, orgRepoName string) ([]*mod.ModuleVersion, error) {
+func headPseudoVersions(ctx context.Context, scm scm, host, orgRepoName string, tags []string) ([]*mod.ModuleVersion, error) {
 	oid, committedAt, err := scm.HeadCommit(ctx, orgRepoName)
 	if err != nil {
 		return nil, err
@@ -106,7 +108,8 @@ func headPseudoVersions(ctx context.Context, scm scm, host, orgRepoName string) 
 	if len(subdirs) == 0 {
 		slog.Info(fmt.Sprintf("No module directory at HEAD for %s; defaulting to GitHub URL for module path", orgRepoName))
 		rootPath := mod.RepoModulePath(host, orgRepoName, "")
-		if pseudo := headPseudoVersion(orgRepoName, rootPath, oid, committedAt); pseudo != nil {
+		base := mod.PseudoVersionBaseFromTags(rootPath, "", tags)
+		if pseudo := headPseudoVersion(orgRepoName, rootPath, base, oid, committedAt); pseudo != nil {
 			versions = append(versions, pseudo)
 		}
 		return versions, nil
@@ -120,7 +123,8 @@ func headPseudoVersions(ctx context.Context, scm scm, host, orgRepoName string) 
 		if modulePath == "" {
 			continue
 		}
-		if pseudo := headPseudoVersion(orgRepoName, modulePath, oid, committedAt); pseudo != nil {
+		base := mod.PseudoVersionBaseFromTags(modulePath, mod.TagPrefix(subdir, modulePath), tags)
+		if pseudo := headPseudoVersion(orgRepoName, modulePath, base, oid, committedAt); pseudo != nil {
 			versions = append(versions, pseudo)
 		}
 	}
@@ -130,8 +134,8 @@ func headPseudoVersions(ctx context.Context, scm scm, host, orgRepoName string) 
 // headPseudoVersion builds the pseudo-version of modulePath at a commit, or nil
 // when mod.Check rejects the result, as it does for a malformed module path like
 // "tools".
-func headPseudoVersion(orgRepoName, modulePath, oid string, committedAt time.Time) *mod.ModuleVersion {
-	version := mod.PseudoVersion(modulePath, oid, committedAt)
+func headPseudoVersion(orgRepoName, modulePath, base, oid string, committedAt time.Time) *mod.ModuleVersion {
+	version := mod.PseudoVersion(modulePath, base, committedAt, oid)
 	if err := mod.Check(modulePath, version); err != nil {
 		slog.Debug(fmt.Sprintf("Skipping HEAD pseudo-version for %s (module %q): %v", orgRepoName, modulePath, err))
 		return nil
@@ -174,6 +178,15 @@ func modulePathForTag(ctx context.Context, scm scm, orgRepoName, tag, subdir, ve
 		return majorPath, true, nil
 	}
 	return modulePath, hasGoMod, nil
+}
+
+// tagNames lists the names of a repo's tags.
+func tagNames(tags []github.Tag) []string {
+	names := make([]string, 0, len(tags))
+	for _, t := range tags {
+		names = append(names, t.Name)
+	}
+	return names
 }
 
 // declaredModulePath returns the module path declared in the go.mod at subdir

@@ -67,12 +67,12 @@ case should produce — the indexer just isn't asked yet. Use it for a case the
 indexer does not handle, with the reason as the argument:
 
 ```
-skip mod.PseudoVersion always passes an empty base version, so it emits v0.0.0-
+skip a subdir tag's go.mod is read only at HEAD, so a moved module resolves wrong
 ```
 
 The reason is what `go test -v` prints, so make it say what is missing rather than
-that something fails. The skipped cases are `grep -l '^skip ' *.txtar`; each one's
-comment documents the divergence from the module system that it is waiting on.
+that something fails. `grep -l '^skip ' *.txtar` lists the skipped cases; nothing
+is skipped today.
 
 ### The files: repo trees
 

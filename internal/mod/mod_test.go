@@ -52,6 +52,7 @@ func TestPseudoVersion(t *testing.T) {
 	tests := []struct {
 		name       string
 		modulePath string
+		base       string
 		commitOID  string
 		want       string
 	}{
@@ -60,6 +61,20 @@ func TestPseudoVersion(t *testing.T) {
 			modulePath: "go.example.com/thing",
 			commitOID:  oid,
 			want:       "v0.0.0-20260102030405-abcdef012345",
+		},
+		{
+			name:       "release base bumps the patch",
+			modulePath: "go.example.com/thing",
+			base:       "v1.2.3",
+			commitOID:  oid,
+			want:       "v1.2.4-0.20260102030405-abcdef012345",
+		},
+		{
+			name:       "prerelease base is extended",
+			modulePath: "go.example.com/thing",
+			base:       "v1.2.3-rc.1",
+			commitOID:  oid,
+			want:       "v1.2.3-rc.1.0.20260102030405-abcdef012345",
 		},
 		{
 			name:       "v2 module keeps its major",
@@ -77,9 +92,9 @@ func TestPseudoVersion(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := PseudoVersion(tc.modulePath, tc.commitOID, committed)
+			got := PseudoVersion(tc.modulePath, tc.base, committed, tc.commitOID)
 			if got != tc.want {
-				t.Errorf("PseudoVersion(%q, %q, ...) = %q, want %q", tc.modulePath, tc.commitOID, got, tc.want)
+				t.Errorf("PseudoVersion(%q, %q, committed, %q) = %q, want %q", tc.modulePath, tc.base, tc.commitOID, got, tc.want)
 			}
 		})
 	}
@@ -152,6 +167,108 @@ func TestMajorSubdir(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := MajorSubdir(tc.subdir, tc.version); got != tc.want {
 				t.Errorf("MajorSubdir(%q, %q) = %q, want %q", tc.subdir, tc.version, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPseudoVersionBaseFromTags(t *testing.T) {
+	tests := []struct {
+		name       string
+		modulePath string
+		subdir     string
+		tags       []string
+		want       string
+	}{
+		{name: "no tags", modulePath: "go.example.com/thing"},
+		{
+			name:       "canonical tag bases a version",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v1.2.3"},
+			want:       "v1.2.3",
+		},
+		{
+			name:       "prerelease tag bases a version",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v1.2.3-rc.1+meta"},
+			want:       "v1.2.3-rc.1",
+		},
+		{
+			name:       "pseudo-version tag bases nothing",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v0.0.0-20240101000000-abcdef123456"},
+		},
+		{
+			name:       "build metadata tag bases a version",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v1.2.3+meta"},
+			want:       "v1.2.3",
+		},
+		{
+			name:       "highest tag wins",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v1.2.3+meta", "v1.9.0+meta", "v1.4.0+meta"},
+			want:       "v1.9.0",
+		},
+		{
+			name:       "prerelease sorts below its release",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v1.9.0+meta", "v1.9.0-rc.1+meta"},
+			want:       "v1.9.0",
+		},
+		{
+			name:       "shorthand and non-semver tags don't base anything",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v1", "v1.2", "0.0.24", "_gheMigrationPR-1", "latest"},
+		},
+		{
+			name:       "major version has to match the path",
+			modulePath: "go.example.com/thing",
+			tags:       []string{"v2.0.0+meta"},
+		},
+		{
+			name:       "major version matching the path counts",
+			modulePath: "go.example.com/thing/v2",
+			subdir:     "",
+			tags:       []string{"v2.3.0+meta"},
+			want:       "v2.3.0",
+		},
+		{
+			name:       "only tags for this subdir count",
+			modulePath: "go.example.com/thing/tracing",
+			subdir:     "tracing",
+			tags:       []string{"v1.9.0+meta", "tracing/v0.4.0+meta", "auth/v3.0.0+meta"},
+			want:       "v0.4.0",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PseudoVersionBaseFromTags(tc.modulePath, tc.subdir, tc.tags); got != tc.want {
+				t.Errorf("PseudoVersionBaseFromTags(%q, %q, %v) = %q, want %q", tc.modulePath, tc.subdir, tc.tags, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTagPrefix(t *testing.T) {
+	tests := []struct {
+		name       string
+		subdir     string
+		modulePath string
+		want       string
+	}{
+		{name: "root module", modulePath: "go.example.com/thing", want: ""},
+		{name: "subdir module", subdir: "tracing", modulePath: "go.example.com/thing/tracing", want: "tracing"},
+		{name: "major subdir drops its version element", subdir: "client/v3", modulePath: "go.example.com/thing/client/v3", want: "client"},
+		{name: "major version at the root", subdir: "v2", modulePath: "go.example.com/thing/v2", want: ""},
+		{name: "major in the path but not the dir", subdir: "kafka", modulePath: "go.example.com/thing/kafka/v4", want: "kafka"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TagPrefix(tc.subdir, tc.modulePath); got != tc.want {
+				t.Errorf("TagPrefix(%q, %q) = %q, want %q", tc.subdir, tc.modulePath, got, tc.want)
 			}
 		})
 	}
