@@ -24,9 +24,10 @@ type scm interface {
 }
 
 // moduleVersionsForRepo returns a module version for each of a repo's semver
-// tags. A repo with no semver tags falls back to a single pseudo-version
-// synthesized from HEAD. host is the module host used to build repo-derived
-// module paths (e.g. "github.mycompany.net").
+// tags, skipping tags that don't resolve to one. A repo with no versions from
+// tags falls back to pseudo-versions synthesized from HEAD, one per module.
+// host is the module host used to build repo-derived module paths
+// (e.g. "github.mycompany.net").
 func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName string) ([]*mod.ModuleVersion, error) {
 	tags, err := scm.RepoTags(ctx, orgRepoName)
 	if err != nil {
@@ -43,14 +44,17 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName strin
 
 		modulePath := mod.RepoModulePath(host, orgRepoName, subdir)
 
-		goModModulePath, found, err := declaredModulePath(ctx, scm, orgRepoName, t.Name, subdir)
+		declaredPath, hasGoMod, err := declaredModulePath(ctx, scm, orgRepoName, t.Name, subdir)
 		switch {
 		case err != nil:
-			slog.Error(fmt.Sprintf("Error getting go.mod file for %s (tag %s): %v; defaulting to GitHub URL for module path", orgRepoName, t.Name, err))
-		case found:
-			modulePath = goModModulePath
+			slog.Error(fmt.Sprintf("Error getting go.mod file for %s (tag %q): %v; defaulting to GitHub URL for module path", orgRepoName, t.Name, err))
+		case !hasGoMod:
+			slog.Info(fmt.Sprintf("Unable to find go.mod file for %s (tag %q); defaulting to GitHub URL for module path", orgRepoName, t.Name))
+		case declaredPath == "":
+			slog.Debug(fmt.Sprintf("Skipping tag %q for %s: its go.mod declares no module path", t.Name, orgRepoName))
+			continue
 		default:
-			slog.Info(fmt.Sprintf("Unable to find go.mod file for %s (tag %s); defaulting to GitHub URL for module path", orgRepoName, t.Name))
+			modulePath = declaredPath
 		}
 
 		if err := mod.Check(modulePath, version); err != nil {
@@ -96,11 +100,11 @@ func headPseudoVersions(ctx context.Context, scm scm, orgRepoName string) ([]*mo
 
 	var versions []*mod.ModuleVersion
 	for _, subdir := range subdirs {
-		modulePath, found, err := declaredModulePath(ctx, scm, orgRepoName, oid, subdir)
+		modulePath, _, err := declaredModulePath(ctx, scm, orgRepoName, oid, subdir)
 		if err != nil {
-			return nil, fmt.Errorf("error getting go.mod at HEAD for %s (subdir %q): %v", orgRepoName, subdir, err)
+			return nil, fmt.Errorf("getting go.mod at HEAD for %s (subdir %q): %v", orgRepoName, subdir, err)
 		}
-		if !found {
+		if modulePath == "" {
 			continue
 		}
 
@@ -120,9 +124,10 @@ func headPseudoVersions(ctx context.Context, scm scm, orgRepoName string) ([]*mo
 }
 
 // declaredModulePath returns the module path declared in the go.mod at subdir
-// (the repo root when subdir is "") for the given ref (a tag or commit). found
-// is false, with a nil error, when there's no go.mod or it declares no module.
-func declaredModulePath(ctx context.Context, scm scm, orgRepoName, ref, subdir string) (string, bool, error) {
+// (the repo root when subdir is "") for the given ref (a tag or commit). hasGoMod
+// is false when there's no go.mod there; modulePath is empty when the go.mod
+// declares no module.
+func declaredModulePath(ctx context.Context, scm scm, orgRepoName, ref, subdir string) (modulePath string, hasGoMod bool, err error) {
 	content, found, err := scm.GoMod(ctx, orgRepoName, ref, subdir)
 	if err != nil {
 		return "", false, err
@@ -130,11 +135,5 @@ func declaredModulePath(ctx context.Context, scm scm, orgRepoName, ref, subdir s
 	if !found {
 		return "", false, nil
 	}
-
-	modulePath := mod.ModulePath(content)
-	if modulePath == "" {
-		return "", false, nil
-	}
-
-	return modulePath, true, nil
+	return mod.ModulePath(content), true, nil
 }
