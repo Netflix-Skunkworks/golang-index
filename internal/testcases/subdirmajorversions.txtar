@@ -2,7 +2,6 @@
 # path under the repo root minus the /vN suffix, so the module in tracing/v2/
 # is tagged "tracing/v2.0.0", not "tracing/v2/v2.1.0". Resolving that tag
 # means reading tracing/v2/go.mod as well as tracing/go.mod.
-skip resolving a subdir tag reads only <subdir>/go.mod, never <subdir>/vN/go.mod
 repo someorg/majors
 head 4444444444444444444444444444444444444444 2026-06-01T00:00:00Z
 tag v1.2.0 2025-01-05T00:00:00Z

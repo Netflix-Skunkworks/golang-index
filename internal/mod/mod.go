@@ -2,6 +2,7 @@
 package mod
 
 import (
+	"path"
 	"strings"
 	"time"
 
@@ -47,6 +48,19 @@ func PseudoVersion(modulePath, commitOID string, committed time.Time) string {
 	return module.PseudoVersion(module.PathMajorPrefix(pathMajor), "", committed, rev)
 }
 
+// MajorSubdir returns the major-version subdirectory a v2+ module's go.mod may
+// live in, below the subdir its tags are prefixed with: "tracing/v2" for a v2
+// version tagged under "tracing", or "v2" for one tagged at the root. It returns
+// "" when there is no such directory, which is the case for v0 and v1.
+//
+// See https://go.dev/ref/mod#vcs-dir.
+func MajorSubdir(subdir, version string) string {
+	if !needsMajorSuffix(version) {
+		return ""
+	}
+	return path.Join(subdir, semver.Major(version))
+}
+
 // IncompatibleVersion returns the form a canonical semver version takes for a
 // module that has no go.mod, and so no /vN path suffix to match: v2 and later get
 // the "+incompatible" suffix. Only a module in the repository root can be
@@ -55,13 +69,21 @@ func PseudoVersion(modulePath, commitOID string, committed time.Time) string {
 //
 // See https://go.dev/ref/mod#incompatible-versions.
 func IncompatibleVersion(subdir, version string) string {
-	if subdir != "" {
-		return version
-	}
-	if m := semver.Major(version); m == "v0" || m == "v1" {
+	if subdir != "" || !needsMajorSuffix(version) {
 		return version
 	}
 	return version + "+incompatible"
+}
+
+// needsMajorSuffix reports whether a canonical version requires a matching /vN
+// module path suffix, which v2 and later do. It is false for anything that isn't a
+// canonical semver version.
+func needsMajorSuffix(version string) bool {
+	switch semver.Major(version) {
+	case "", "v0", "v1":
+		return false
+	}
+	return true
 }
 
 // ModulePath returns the module path declared in a go.mod file, or "" when the
