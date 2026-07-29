@@ -1,0 +1,14 @@
+# Per https://go.dev/ref/mod#incompatible-versions a v2+ tag on a repo with no
+# go.mod is valid as a "+incompatible" version, so v2.0.0 is recorded as
+# v2.0.0+incompatible rather than dropped for lacking a /v2 suffix. The suffix
+# belongs to the version string, not to the git tag.
+skip we drop a v2+ tag instead of recording it as +incompatible when the tagged commit has no go.mod
+repo someorg/incompat
+head 7777777777777777777777777777777777777777 2026-06-01T00:00:00Z
+tag v1.0.0 2025-01-07T00:00:00Z
+tag v2.0.0 2025-02-07T00:00:00Z
+-- someorg/incompat/README.md --
+pre-modules
+-- want --
+someorg/incompat github.fake.test/someorg/incompat v1.0.0 2025-01-07T00:00:00Z
+someorg/incompat github.fake.test/someorg/incompat v2.0.0+incompatible 2025-02-07T00:00:00Z

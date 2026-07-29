@@ -1,0 +1,12 @@
+# "module tools" has no dot in its first path element, so module.Check rejects
+# it and no consumer could fetch it. Such a path is fine for a local main
+# module, which is why the tools.go pinning pattern in most Terraform provider
+# repos uses one. Skipping it must not cost the repo its other module.
+repo someorg/provider
+head aaaa111111111111111111111111111111111111 2026-02-03T04:05:06Z
+-- someorg/provider/go.mod --
+module go.example.com/provider
+-- someorg/provider/tools/go.mod --
+module tools
+-- want --
+someorg/provider go.example.com/provider v0.0.0-20260203040506-aaaa11111111 2026-02-03T04:05:06Z

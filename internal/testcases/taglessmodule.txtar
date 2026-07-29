@@ -1,5 +1,7 @@
-# The repo has qualifying tags, so the pseudo-version fallback does not fire.
-# The experimental module has a go.mod but no tag, so it gets no version at all.
+# The pseudo-version fallback is per repo, not per module: one qualifying tag
+# anywhere suppresses it for every module in the repo, so the untagged
+# experimental module gets no row. That is our policy, not the module system's.
+# The go tool resolves experimental at a HEAD pseudo-version.
 repo someorg/tagless
 head dd00112233445566778899aabbccddeeff001122 2026-04-05T06:07:08Z
 tag v1.0.0 2025-05-05T00:00:00Z

@@ -1,6 +1,8 @@
-# Two repos declare the same module path at the same version, as a fork or mirror
-# would. Both rows must coexist: row identity is (org_repo_name, module_path,
-# version), so one repo's store must not delete the other's.
+# Two repos declare the same module path at the same version, as an un-renamed
+# fork or a vendored copy would. Row identity is (org_repo_name, module_path,
+# version), so one repo's store must not delete the other's. Only one of them
+# is ever fetchable, since the path resolves to a single repo, and recording
+# both keeps the collision visible instead of letting indexing order hide it.
 repo someorg/shared-a
 head aaaa000000000000000000000000000000000000 2026-01-01T00:00:00Z
 tag v1.0.0 2025-01-02T03:04:05Z

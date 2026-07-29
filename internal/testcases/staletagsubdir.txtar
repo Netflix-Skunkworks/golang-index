@@ -1,0 +1,14 @@
+# wellknown/ is gone at HEAD; it exists only at the commit wellknown/v0.0.1
+# points at. The version still resolves, because a tag's go.mod is read at
+# that tag's own commit. The surviving aws module is untagged, and one usable
+# tag in the repo suppresses the pseudo-version pass, so it gets no row. Same
+# policy as taglessmodule.txtar.
+repo someorg/networkkit
+head 9999999999999999999999999999999999999999 2026-06-01T00:00:00Z
+tag wellknown/v0.0.1 2025-01-09T00:00:00Z
+-- someorg/networkkit/aws/go.mod --
+module go.example.com/networkkit/aws
+-- someorg/networkkit@wellknown/v0.0.1/wellknown/go.mod --
+module go.example.com/networkkit/wellknown
+-- want --
+someorg/networkkit go.example.com/networkkit/wellknown v0.0.1 2025-01-09T00:00:00Z

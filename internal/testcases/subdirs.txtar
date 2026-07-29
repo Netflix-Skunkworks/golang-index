@@ -1,6 +1,6 @@
-# Subdirectory tags ("tracing/v0.2.0") resolve to the module path that subdir's
-# go.mod declares, not to one derived from the repo: tracing keeps a repo-shaped
-# path, auth declares a vanity one.
+# A subdirectory tag's module path comes from that subdirectory's go.mod, not
+# from the repo path plus the tag prefix. auth declares a vanity path unrelated
+# to the repo, so its row can only come from reading the go.mod.
 repo someorg/subdirs
 head 2222222222222222222222222222222222222222 2026-06-01T00:00:00Z
 tag tracing/v0.2.0 2025-03-04T05:06:07Z

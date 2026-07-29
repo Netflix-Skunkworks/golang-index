@@ -1,6 +1,14 @@
-# Tags change upstream between the two index cycles: v1.2.0 appears and v1.1.0 is
-# deleted. The new version is stored, the deleted one is pruned, and v1.0.0 keeps
-# the indexed_at it already had (which every subtest checks; see harness.assertFeed).
+# Tags churn upstream between the two cycles: v1.2.0 is stored, v1.1.0's row is
+# pruned rather than left behind, and v1.0.0 keeps its original indexed_at.
+#
+# TODO(jbarkhuysen): re-evaluate the pruning half. https://go.dev/ref/mod says a
+# tag should not be deleted and that a deleted tag's content may stay available on
+# proxies, and index.golang.org's answer to a bad release is to retract it, not to
+# remove it. Deleting the row makes feed history depend on when a consumer polls:
+# one that read v1.1.0 before the prune keeps it forever and never learns it went
+# away, while a consumer replaying from since=0 afterwards never sees it. A
+# withdrawn_at column, filtered on the serve path but not on /index, would keep
+# the feed append-only.
 repo someorg/churn
 head 3333333333333333333333333333333333333333 2026-06-01T00:00:00Z
 tag v1.0.0 2025-01-02T03:04:05Z

@@ -1,0 +1,4 @@
+# A repo with no commits: no HEAD to derive a pseudo-version from, and no tags
+# either, since a tag needs an object to point at. Nothing to index.
+repo someorg/empty
+-- want --

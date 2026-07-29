@@ -1,7 +1,13 @@
-# No go.mod at HEAD and no tags: there is no module to synthesize a pseudo-version
-# for, so the repo produces no versions.
+# A repo still on GOPATH-era layout: Go source, no go.mod, no tags. The go tool
+# serves it at the repo URL with a HEAD pseudo-version, the same path the tag in
+# nogomod.txtar resolves to, so the two cases should agree. A missing go.mod does
+# not decide whether a repo is a module.
+skip headPseudoVersions has no repo-URL fallback, so a repo with no go.mod yields nothing
 repo someorg/nogomodhead
 head 110022003300440055006600770088009900aabb 2026-07-08T09:10:11Z
--- someorg/nogomodhead/README.md --
-hi
+-- someorg/nogomodhead/main.go --
+package main
+
+func main() {}
 -- want --
+someorg/nogomodhead github.fake.test/someorg/nogomodhead v0.0.0-20260708091011-110022003300 2026-07-08T09:10:11Z
