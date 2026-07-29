@@ -71,10 +71,8 @@ skip resolving a subdir tag reads only <subdir>/go.mod, never <subdir>/vN/go.mod
 ```
 
 The reason is what `go test -v` prints, so make it say what is missing rather than
-that something fails. Six fixtures are skipped today, each for a divergence from
-the module system that is documented in its comment: `buildmetadatatag`,
-`incompatible`, `majorsubdironly`, `modulelessgomodtagged`, `nomodulesathead`, and
-`subdirmajorversions`.
+that something fails. The skipped cases are `grep -l '^skip ' *.txtar`; each one's
+comment documents the divergence from the module system that it is waiting on.
 
 ### The files: repo trees
 

@@ -23,9 +23,10 @@ type Repo struct {
 	Tags     []Tag
 	// Files maps a repo-relative path ("go.mod", "tracing/go.mod") to its content.
 	Files map[string][]byte
-	// FilesAtRef replaces Files at one ref, keyed by ref and then by path. It is
-	// for content that differs between refs — a root go.mod whose module path
-	// gained a /vN suffix after the tags that predate the bump, say.
+	// FilesAtRef overlays Files at one ref, keyed by ref and then by path: it can
+	// replace a file's content there or add one that no other ref has. Use it for
+	// content that differs between refs — a root go.mod whose module path gained a
+	// /vN suffix after the tags that predate the bump, say. SetFileAtTail fills it.
 	FilesAtRef map[string]map[string][]byte
 }
 
@@ -53,6 +54,27 @@ func (r *Repo) fileFromTail(tail string) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+// SetFileAtTail files data as the content at a single ref, splitting the
+// "{ref}/{path}" tail the way [Repo.fileFromTail] resolves it so that the two
+// agree on where a slashed ref ends. It reports false if no known ref matches.
+func (r *Repo) SetFileAtTail(tail string, data []byte) bool {
+	for _, ref := range r.refs() {
+		path, ok := strings.CutPrefix(tail, ref+"/")
+		if !ok {
+			continue
+		}
+		if r.FilesAtRef == nil {
+			r.FilesAtRef = map[string]map[string][]byte{}
+		}
+		if r.FilesAtRef[ref] == nil {
+			r.FilesAtRef[ref] = map[string][]byte{}
+		}
+		r.FilesAtRef[ref][path] = data
+		return true
+	}
+	return false
 }
 
 // pathsAt lists the repo's tree at a ref, in path order.
