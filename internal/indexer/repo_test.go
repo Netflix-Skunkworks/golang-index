@@ -47,7 +47,7 @@ func versionsForRepo(t *testing.T, scm scm) []*mod.ModuleVersion {
 	return got
 }
 
-func TestModuleVersionsForRepo_Empty(t *testing.T) {
+func TestModuleVersionsForRepo_NoVersionsWhenRepoHasNoCommits(t *testing.T) {
 	got := versionsForRepo(t, &fakeSCM{})
 	if len(got) != 0 {
 		t.Errorf("moduleVersionsForRepo() = %d versions, want 0", len(got))
@@ -154,10 +154,31 @@ func TestModuleVersionsForRepo_SkipsMajorVersionMismatch(t *testing.T) {
 	}
 }
 
-func TestModuleVersionsForRepo_NoPseudoVersionWhenHeadHasNoGoMod(t *testing.T) {
+func TestModuleVersionsForRepo_PseudoVersionAtRepoURLWhenNoGoMod(t *testing.T) {
 	commitDate := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	// HEAD exists but the repo has no modules, so there's nothing to synthesize.
-	scm := &fakeSCM{headOID: "abcdef0123456789abcdef0123456789abcdef01", headAt: commitDate}
+	const oid = "abcdef0123456789abcdef0123456789abcdef01"
+	// No module dirs, so there's no go.mod to read a path from.
+	scm := &fakeSCM{headOID: oid, headAt: commitDate}
+
+	want := []*mod.ModuleVersion{{
+		Version:    "v0.0.0-20260102030405-abcdef012345",
+		Created:    commitDate,
+		ModulePath: testModuleHost + "/someorg/repo1",
+	}}
+
+	if diff := cmp.Diff(want, versionsForRepo(t, scm)); diff != "" {
+		t.Errorf("moduleVersionsForRepo mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestModuleVersionsForRepo_NoPseudoVersionWhenGoModDeclaresNoModule(t *testing.T) {
+	const oid = "abcdef0123456789abcdef0123456789abcdef01"
+	scm := &fakeSCM{
+		headOID:    oid,
+		headAt:     time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		moduleDirs: []string{""},
+		goMods:     map[goModKey]string{{ref: oid, subdir: ""}: "go 1.22\n"},
+	}
 
 	if got := versionsForRepo(t, scm); len(got) != 0 {
 		t.Errorf("moduleVersionsForRepo() = %d versions, want 0", len(got))

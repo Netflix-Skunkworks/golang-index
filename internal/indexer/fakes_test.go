@@ -56,7 +56,7 @@ type fakeSCM struct {
 	// go.mod there.
 	goMods map[goModKey]string
 	// moduleDirs is what ModuleDirs returns: the subdirs holding a go.mod at HEAD
-	// (the repo root is "").
+	// (the repo root is ""). Nil means the repo has no go.mod at all.
 	moduleDirs []string
 	// repoTagsFails makes the first repoTagsFails RepoTags calls return an error,
 	// to exercise transient-error handling. repoTagsCalls counts calls made.
