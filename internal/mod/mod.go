@@ -26,26 +26,80 @@ type ModuleVersion struct {
 //
 // ok is false when the tag isn't a canonical semver, like v1", "foo", etc.
 func ModuleVersionFromTag(tag string) (subdir, version string, ok bool) {
-	version = tag
-	if i := strings.LastIndex(tag, "/"); i >= 0 {
-		subdir, version = tag[:i], tag[i+1:]
-	}
+	subdir, version = splitTag(tag)
 	if !semver.IsValid(version) || semver.Canonical(version) != version {
 		return "", "", false
 	}
 	return subdir, version, true
 }
 
-// PseudoVersion builds a Go pseudo-version for a module at a commit:
-// "vMAJOR.0.0-<yyyymmddhhmmss>-<12-char-commit>". MAJOR comes from the module
-// path's /vN suffix, or v0 when it has none.
-func PseudoVersion(modulePath, commitOID string, committed time.Time) string {
+// splitTag divides a tag into the module subdirectory it names and its version
+// part: "tracing/v2.0.0" is v2.0.0 of the module in tracing.
+func splitTag(tag string) (subdir, version string) {
+	if i := strings.LastIndex(tag, "/"); i >= 0 {
+		return tag[:i], tag[i+1:]
+	}
+	return "", tag
+}
+
+// PseudoVersion builds a Go pseudo-version for a module at a commit. base is the
+// canonical version it builds on, and its form follows from that:
+//
+//	""            -> v0.0.0-20260102030405-abcdef012345
+//	"v1.2.3"      -> v1.2.4-0.20260102030405-abcdef012345
+//	"v1.2.3-rc.1" -> v1.2.3-rc.1.0.20260102030405-abcdef012345
+//
+// With an empty base the major version comes from the module path's /vN suffix, or
+// is v0 when it has none.
+//
+// See https://go.dev/ref/mod#pseudo-versions.
+func PseudoVersion(modulePath, base string, committed time.Time, commitOID string) string {
 	rev := commitOID
 	if len(rev) > 12 {
 		rev = rev[:12]
 	}
 	_, pathMajor, _ := module.SplitPathVersion(modulePath)
-	return module.PseudoVersion(module.PathMajorPrefix(pathMajor), "", committed, rev)
+	return module.PseudoVersion(module.PathMajorPrefix(pathMajor), base, committed, rev)
+}
+
+// PseudoVersionBaseFromTags picks the version a module's pseudo-version builds on:
+// the highest version among the repo's tags prefixed with tagPrefix ("" for a
+// module in the repo root). It returns "" when no tag qualifies, which yields the
+// vMAJOR.0.0 form.
+//
+// The base is assumed to be an ancestor of the commit being versioned. A list of
+// tag names can't establish that, so a base taken from a tag outside the commit's
+// history yields a pseudo-version the go tool rejects as not descending from it.
+func PseudoVersionBaseFromTags(modulePath, tagPrefix string, tags []string) string {
+	var base string
+	for _, tag := range tags {
+		prefix, candidate, ok := tagBaseVersion(tag)
+		if !ok || prefix != tagPrefix {
+			continue
+		}
+		// A base has to be a version of this module path, major version included.
+		if Check(modulePath, candidate) != nil {
+			continue
+		}
+		if semver.Compare(candidate, base) > 0 {
+			base = candidate
+		}
+	}
+	return base
+}
+
+// tagBaseVersion reads the canonical version a tag can base a pseudo-version on,
+// which is looser than [ModuleVersionFromTag]: build metadata is ignored, so
+// "tracing/v1.2.3+meta" bases v1.2.3 even though it names no version of its own.
+// Shorthand like "v1" or "v1.2" bases nothing, and neither does a tag that already
+// looks like a pseudo-version.
+func tagBaseVersion(tag string) (tagPrefix, base string, ok bool) {
+	tagPrefix, version := splitTag(tag)
+	base = semver.Canonical(version)
+	if base == "" || version != base+semver.Build(version) || module.IsPseudoVersion(version) {
+		return "", "", false
+	}
+	return tagPrefix, base, true
 }
 
 // MajorSubdir returns the major-version subdirectory a v2+ module's go.mod may
@@ -59,6 +113,22 @@ func MajorSubdir(subdir, version string) string {
 		return ""
 	}
 	return path.Join(subdir, semver.Major(version))
+}
+
+// TagPrefix returns the prefix a module's tags carry, given the subdirectory its
+// go.mod sits in. That is the subdirectory itself, minus a major-version element:
+// the module in "client/v3" declaring ".../client/v3" is tagged "client/v3.5.0", so
+// its prefix is "client". It is the inverse of [MajorSubdir].
+func TagPrefix(subdir, modulePath string) string {
+	_, pathMajor, _ := module.SplitPathVersion(modulePath)
+	if pathMajor == "" {
+		return subdir
+	}
+	dir, last := path.Split(subdir)
+	if last != strings.TrimPrefix(pathMajor, "/") {
+		return subdir
+	}
+	return strings.TrimSuffix(dir, "/")
 }
 
 // IncompatibleVersion returns the form a canonical semver version takes for a
