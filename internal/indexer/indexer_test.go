@@ -165,7 +165,7 @@ func TestRepoTagsIndexer_StoresTags(t *testing.T) {
 			return nil
 		},
 	}
-	scm := fakeFromTags([]tagSpec{{tag: "v1.0.0", date: date}})
+	scm := fakeFromTags(t, []tagSpec{{tag: "v1.0.0", date: date}})
 
 	if err := newRepoTagsIndexer(store, scm).Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run returned %v, want context.Canceled", err)
@@ -227,7 +227,7 @@ func TestRepoTagsIndexer_RetriesAfterGitHubError(t *testing.T) {
 			return nil
 		},
 	}
-	scm := fakeFromTags([]tagSpec{{tag: "v1.0.0", date: date}})
+	scm := fakeFromTags(t, []tagSpec{{tag: "v1.0.0", date: date}})
 	scm.repoTagsFails = 1
 
 	if err := newRepoTagsIndexer(store, scm).Run(ctx); !errors.Is(err, context.Canceled) {

@@ -17,16 +17,22 @@ type tagSpec struct {
 	date         time.Time
 }
 
-func fakeFromTags(specs []tagSpec) *fakeSCM {
+func fakeFromTags(t *testing.T, specs []tagSpec) *fakeSCM {
+	t.Helper()
+
 	f := &fakeSCM{goMods: map[goModKey]string{}}
 	for _, s := range specs {
 		f.tags = append(f.tags, github.Tag{Name: s.tag, Date: s.date})
-		if s.goModContent != "" {
-			// A subdir tag's go.mod is read at (tag, subdir), matching how
-			// moduleVersionsForRepo calls GoMod.
-			subdir, _, _ := mod.ModuleVersionFromTag(s.tag)
-			f.goMods[goModKey{ref: s.tag, subdir: subdir}] = s.goModContent
+		if s.goModContent == "" {
+			continue
 		}
+		// A subdir tag's go.mod is read at (tag, subdir), matching how
+		// moduleVersionsForRepo calls GoMod.
+		subdir, _, ok := mod.ModuleVersionFromTag(s.tag)
+		if !ok {
+			t.Fatalf("tag %q sets goModContent but isn't a module version tag, so nothing reads it", s.tag)
+		}
+		f.goMods[goModKey{ref: s.tag, subdir: subdir}] = s.goModContent
 	}
 	return f
 }
@@ -50,12 +56,15 @@ func TestModuleVersionsForRepo_Empty(t *testing.T) {
 
 func TestModuleVersionsForRepo_Tags(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
-	scm := fakeFromTags([]tagSpec{
+	scm := fakeFromTags(t, []tagSpec{
 		{tag: "v1.0.0", date: date, goModContent: "module stash.someorg.company.com/someorg/repo1\n"},
 		{tag: "v1.1.0", date: date},
 		{tag: "v1.2.0", date: date},
 		{tag: "v1.3.0", date: date},
+		// A bad module path, then a go.mod with no module line: skip both rather
+		// than fall back to the repo URL.
 		{tag: "v1.4.0", date: date, goModContent: "module invalid/module/path"},
+		{tag: "v1.5.0", date: date, goModContent: "go 1.22\n"},
 		{tag: "v0.9.0", date: date},
 	})
 
@@ -64,7 +73,6 @@ func TestModuleVersionsForRepo_Tags(t *testing.T) {
 		{Version: "v1.1.0", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
 		{Version: "v1.2.0", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
 		{Version: "v1.3.0", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
-		// v1.4.0's go.mod has a bad module path, so it's skipped.
 		{Version: "v0.9.0", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
 	}
 
@@ -75,7 +83,7 @@ func TestModuleVersionsForRepo_Tags(t *testing.T) {
 
 func TestModuleVersionsForRepo_SubdirectoryAndNonModuleTags(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
-	scm := fakeFromTags([]tagSpec{
+	scm := fakeFromTags(t, []tagSpec{
 		{tag: "v1.0.0", date: date},
 		{tag: "tracing/v0.2.2", date: date},
 		{tag: "cmd/tool/v0.1.0", date: date},
@@ -104,7 +112,7 @@ func TestModuleVersionsForRepo_SubdirectoryAndNonModuleTags(t *testing.T) {
 
 func TestModuleVersionsForRepo_SubdirectoryModuleGoMod(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
-	scm := fakeFromTags([]tagSpec{
+	scm := fakeFromTags(t, []tagSpec{
 		// Subdir module at v2+: keep the /v2 from its go.mod.
 		{tag: "tracing/v2.0.0", date: date, goModContent: "module go.example.com/monorepo/tracing/v2\n"},
 		// go.mod declares a vanity/moved path: use it as-is.
@@ -126,7 +134,7 @@ func TestModuleVersionsForRepo_SubdirectoryModuleGoMod(t *testing.T) {
 
 func TestModuleVersionsForRepo_SkipsMajorVersionMismatch(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
-	scm := fakeFromTags([]tagSpec{
+	scm := fakeFromTags(t, []tagSpec{
 		// Root v2+ with no go.mod: path has no /v2 suffix, so skip it.
 		{tag: "v2.0.0", date: date},
 		// Root v2+ but the go.mod path is v0/v1, so skip it.

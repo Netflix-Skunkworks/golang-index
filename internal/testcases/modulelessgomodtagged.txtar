@@ -3,7 +3,6 @@
 # module path fails outright: "go.mod is missing module path at revision v1.0.0".
 # So the tag yields nothing. Repos really do this to fence a subtree off from its
 # parent module; rules_go has a zero-byte tests/go.mod.
-skip a go.mod with no module line falls back to the repo URL, where the go tool refuses the version outright
 repo someorg/nomodule
 head ff00112233445566778899aabbccddeeff001122 2026-06-07T08:09:10Z
 tag v1.0.0 2025-01-12T00:00:00Z
