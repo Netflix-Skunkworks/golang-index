@@ -2,7 +2,6 @@
 # serves it at the repo URL with a HEAD pseudo-version, the same path the tag in
 # nogomod.txtar resolves to, so the two cases should agree. A missing go.mod does
 # not decide whether a repo is a module.
-skip headPseudoVersions has no repo-URL fallback, so a repo with no go.mod yields nothing
 repo someorg/nogomodhead
 head 110022003300440055006600770088009900aabb 2026-07-08T09:10:11Z
 -- someorg/nogomodhead/main.go --
