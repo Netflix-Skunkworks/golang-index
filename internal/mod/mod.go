@@ -47,6 +47,23 @@ func PseudoVersion(modulePath, commitOID string, committed time.Time) string {
 	return module.PseudoVersion(module.PathMajorPrefix(pathMajor), "", committed, rev)
 }
 
+// IncompatibleVersion returns the form a canonical semver version takes for a
+// module that has no go.mod, and so no /vN path suffix to match: v2 and later get
+// the "+incompatible" suffix. Only a module in the repository root can be
+// versioned this way, so a version from a subdir comes back unchanged, as do v0
+// and v1, which need no suffix.
+//
+// See https://go.dev/ref/mod#incompatible-versions.
+func IncompatibleVersion(subdir, version string) string {
+	if subdir != "" {
+		return version
+	}
+	if m := semver.Major(version); m == "v0" || m == "v1" {
+		return version
+	}
+	return version + "+incompatible"
+}
+
 // ModulePath returns the module path declared in a go.mod file, or "" when the
 // bytes have no module line.
 func ModulePath(goMod []byte) string {

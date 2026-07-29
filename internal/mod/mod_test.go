@@ -106,3 +106,28 @@ func TestRepoModulePath(t *testing.T) {
 		})
 	}
 }
+
+func TestIncompatibleVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		subdir  string
+		version string
+		want    string
+	}{
+		{name: "v0 needs no suffix", version: "v0.3.0", want: "v0.3.0"},
+		{name: "v1 needs no suffix", version: "v1.2.3", want: "v1.2.3"},
+		{name: "v2 gets the suffix", version: "v2.0.0", want: "v2.0.0+incompatible"},
+		{name: "v10 gets the suffix", version: "v10.1.2", want: "v10.1.2+incompatible"},
+		{name: "v2 prerelease gets the suffix", version: "v2.0.0-rc.1", want: "v2.0.0-rc.1+incompatible"},
+		{name: "later prerelease gets the suffix", version: "v4.1.0-rc.2", want: "v4.1.0-rc.2+incompatible"},
+		{name: "subdir module can't be incompatible", subdir: "tracing", version: "v2.0.0", want: "v2.0.0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IncompatibleVersion(tc.subdir, tc.version); got != tc.want {
+				t.Errorf("IncompatibleVersion(%q, %q) = %q, want %q", tc.subdir, tc.version, got, tc.want)
+			}
+		})
+	}
+}

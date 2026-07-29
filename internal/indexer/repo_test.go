@@ -135,18 +135,39 @@ func TestModuleVersionsForRepo_SubdirectoryModuleGoMod(t *testing.T) {
 func TestModuleVersionsForRepo_SkipsMajorVersionMismatch(t *testing.T) {
 	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
 	scm := fakeFromTags(t, []tagSpec{
-		// Root v2+ with no go.mod: path has no /v2 suffix, so skip it.
-		{tag: "v2.0.0", date: date},
 		// Root v2+ but the go.mod path is v0/v1, so skip it.
 		{tag: "v2.1.0", date: date, goModContent: "module vanity.example.com/thing\n"},
 		// Subdir v3 tag but the go.mod is /v2, so skip it.
 		{tag: "tracing/v3.0.0", date: date, goModContent: "module go.example.com/monorepo/tracing/v2\n"},
+		// A subdir v2 tag with no go.mod can't be +incompatible, which is only for
+		// a module in the repo root, so skip it too.
+		{tag: "tracing/v2.0.0", date: date},
 		// A plain v1 tag still comes through.
 		{tag: "v1.5.0", date: date},
 	})
 
 	want := []*mod.ModuleVersion{
 		{Version: "v1.5.0", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
+	}
+
+	if diff := cmp.Diff(want, versionsForRepo(t, scm)); diff != "" {
+		t.Errorf("moduleVersionsForRepo mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestModuleVersionsForRepo_IncompatibleWhenRepoHasNoGoMod(t *testing.T) {
+	date := time.Date(2025, 1, 2, 3, 4, 5, 6, time.UTC)
+	// A pre-modules repo that kept releasing past v1.
+	scm := fakeFromTags(t, []tagSpec{
+		{tag: "v1.0.0", date: date},
+		{tag: "v2.0.0", date: date},
+		{tag: "v3.1.0-rc.1", date: date},
+	})
+
+	want := []*mod.ModuleVersion{
+		{Version: "v1.0.0", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
+		{Version: "v2.0.0+incompatible", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
+		{Version: "v3.1.0-rc.1+incompatible", Created: date, ModulePath: testModuleHost + "/someorg/repo1"},
 	}
 
 	if diff := cmp.Diff(want, versionsForRepo(t, scm)); diff != "" {

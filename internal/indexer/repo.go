@@ -24,10 +24,11 @@ type scm interface {
 }
 
 // moduleVersionsForRepo returns a module version for each of a repo's semver
-// tags, skipping tags that don't resolve to one. A repo with no versions from
-// tags falls back to pseudo-versions synthesized from HEAD, one per module.
-// host is the module host used to build repo-derived module paths
-// (e.g. "github.mycompany.net").
+// tags, skipping tags that don't resolve to one. A version is not always identical
+// to its tag: a v2+ tag on a repo with no go.mod is recorded as +incompatible. A
+// repo with no versions from tags falls back to pseudo-versions synthesized from
+// HEAD, one per module. host is the module host used to build repo-derived module
+// paths (e.g. "github.mycompany.net").
 func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName string) ([]*mod.ModuleVersion, error) {
 	tags, err := scm.RepoTags(ctx, orgRepoName)
 	if err != nil {
@@ -50,6 +51,7 @@ func moduleVersionsForRepo(ctx context.Context, scm scm, host, orgRepoName strin
 			slog.Error(fmt.Sprintf("Error getting go.mod file for %s (tag %q): %v; defaulting to GitHub URL for module path", orgRepoName, t.Name, err))
 		case !hasGoMod:
 			slog.Info(fmt.Sprintf("Unable to find go.mod file for %s (tag %q); defaulting to GitHub URL for module path", orgRepoName, t.Name))
+			version = mod.IncompatibleVersion(subdir, version)
 		case declaredPath == "":
 			slog.Debug(fmt.Sprintf("Skipping tag %q for %s: its go.mod declares no module path", t.Name, orgRepoName))
 			continue
