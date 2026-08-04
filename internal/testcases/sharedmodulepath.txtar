@@ -3,6 +3,8 @@
 # version), so one repo's store must not delete the other's. Only one of them
 # is ever fetchable, since the path resolves to a single repo, and recording
 # both keeps the collision visible instead of letting indexing order hide it.
+# The feed is narrower than the table here: it publishes the module version once,
+# at whichever row was seen first.
 repo someorg/shared-a
 head aaaa000000000000000000000000000000000000 2026-01-01T00:00:00Z
 tag v1.0.0 2025-01-02T03:04:05Z

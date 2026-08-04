@@ -55,8 +55,13 @@ func rowOf(v *db.RepoModuleVersion) row {
 	}
 }
 
-// key identifies the module version a row is about, ignoring when it was created.
-func (r row) key() string { return r.Repo + " " + r.Module + "@" + r.Version }
+// key identifies a row by its repo and module version, ignoring when it was
+// created.
+func (r row) key() string { return r.Repo + " " + r.moduleVersion() }
+
+// moduleVersion identifies the module version a row is about, ignoring which repo
+// claims it, as the /index feed does.
+func (r row) moduleVersion() string { return r.Module + "@" + r.Version }
 
 // formatCreated renders a timestamp the one way both want files and stored rows
 // are spelled, so the two are compared in the same form.
@@ -65,6 +70,17 @@ func formatCreated(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 // sortRows orders rows the way both want files and query results are compared.
 func sortRows(rows []row) {
 	slices.SortFunc(rows, func(a, b row) int { return strings.Compare(a.key(), b.key()) })
+}
+
+// rowsOf renders stored module versions as sorted rows, the form a want file is
+// compared in.
+func rowsOf(stored []*db.RepoModuleVersion) []row {
+	var rows []row
+	for _, v := range stored {
+		rows = append(rows, rowOf(v))
+	}
+	sortRows(rows)
+	return rows
 }
 
 // loadFixture reads and parses the archive at path.
