@@ -56,6 +56,50 @@ func TestFetchRepoModuleVersions(t *testing.T) {
 	}
 }
 
+func TestFetchRepoModuleVersions_SharedModulePath(t *testing.T) {
+	// Where several repos claim one module version, the feed publishes it once, at
+	// the earliest indexed_at; polling past that does not resurface the rest.
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+
+	// UTC and whole seconds, the precision populateRepoModuleVersions stores
+	// indexed_at with, so now.Add(time.Microsecond) below really does exclude now.
+	now := time.Now().UTC().Truncate(time.Second)
+	created := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	firstSeen := &db.RepoModuleVersion{OrgRepoName: "someorg/shared-a", Version: "v1.0.0", ModulePath: "go.example.com/shared", Created: created, IndexedAt: now}
+	seenLater := &db.RepoModuleVersion{OrgRepoName: "someorg/shared-b", Version: "v1.0.0", ModulePath: "go.example.com/shared", Created: created, IndexedAt: now.Add(2 * time.Second)}
+	// Two repos seen at the same instant: org_repo_name breaks the tie, so tie-a wins.
+	tieWinner := &db.RepoModuleVersion{OrgRepoName: "someorg/tie-a", Version: "v2.0.0", ModulePath: "go.example.com/tied", Created: created, IndexedAt: now.Add(4 * time.Second)}
+	tieLoser := &db.RepoModuleVersion{OrgRepoName: "someorg/tie-b", Version: "v2.0.0", ModulePath: "go.example.com/tied", Created: created, IndexedAt: now.Add(4 * time.Second)}
+	unshared := &db.RepoModuleVersion{OrgRepoName: "someorg/solo", Version: "v1.0.0", ModulePath: "go.example.com/solo", Created: created, IndexedAt: now.Add(6 * time.Second)}
+
+	// tieLoser is stored before tieWinner, so a winner picked by insertion order
+	// rather than by org_repo_name would fail below.
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{firstSeen, seenLater, tieLoser, tieWinner, unshared})
+
+	sinceBeforeAny := now.Add(-1 * time.Hour)
+	got, err := sutDB.FetchRepoModuleVersions(t.Context(), sinceBeforeAny, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []*db.RepoModuleVersion{firstSeen, tieWinner, unshared}
+	if diff := cmp.Diff(want, got, cmpopts.EquateApproxTime(time.Second)); diff != "" {
+		t.Errorf("FetchRepoModuleVersions(since=%v): -want,+got:\n%s", sinceBeforeAny, diff)
+	}
+
+	// Polling past the first sighting must not resurface the rows it stood in for.
+	sincePastFirstSeen := now.Add(time.Microsecond)
+	got, err = sutDB.FetchRepoModuleVersions(t.Context(), sincePastFirstSeen, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []*db.RepoModuleVersion{tieWinner, unshared}
+	if diff := cmp.Diff(want, got, cmpopts.EquateApproxTime(time.Second)); diff != "" {
+		t.Errorf("FetchRepoModuleVersions(since=%v): -want,+got:\n%s", sincePastFirstSeen, diff)
+	}
+}
+
 func TestStoreRepos(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)

@@ -13,11 +13,14 @@ A case runs like this:
 3. Apply the fixture's `cycle` section, if it has one, and index again.
 4. Compare with `want.2` — or with `want` again, when the fixture has no `cycle`
    section and so nothing changed upstream.
-5. Check the `/index` feed's append-only-log properties across that second cycle:
+5. Check that each cycle's `/index` feed publishes a module version once, even
+   where several repos claim it, so the feed is narrower than the table for a
+   fixture like `sharedmodulepath`.
+6. Check the `/index` feed's append-only-log properties across that second cycle:
    surviving rows keep their `indexed_at`, new rows get a later one, and a
    consumer polling from the pre-re-index cursor sees exactly the new rows.
 
-Steps 3–5 run for every fixture, so each one also covers re-indexing being
+Steps 3–6 run for every fixture, so each one also covers re-indexing being
 idempotent, whether or not it describes upstream changes.
 
 ## Format
@@ -116,7 +119,7 @@ One line per expected row of `repo_module_versions`:
 for a pseudo-version. Both sides are normalized to UTC before comparison, so any
 spelling of the right instant works; the fixtures all use UTC. `indexed_at` is
 deliberately absent: it is wall-clock time, so the test asserts on it structurally
-instead (step 5 above).
+instead (step 6 above).
 
 Order doesn't matter (both sides are sorted), and blank lines and `#` comments
 are ignored. A `want` file is required even when the fixture expects no rows —

@@ -44,16 +44,54 @@ func TestIndexing(t *testing.T) {
 			h := newHarness(t, f.repoList()...)
 
 			h.indexAll(t)
-			first := h.stored(t, time.Time{})
-			assertRows(t, "first index cycle", f.want, first)
+			if diff := cmp.Diff(f.want, rowsOf(h.stored(t))); diff != "" {
+				t.Errorf("stored rows after the first index cycle (-want +got):\n%s", diff)
+			}
+			firstFeed := h.feed(t, time.Time{})
+			for _, r := range repeats(firstFeed) {
+				t.Errorf("the first index cycle's feed carries %q twice, for %q and %q", r.moduleVersion, r.first, r.second)
+			}
 
 			f.applyUpdate(t)
 			h.makeReindexDue(t)
 			h.indexAll(t)
 
-			second := h.stored(t, time.Time{})
-			assertRows(t, "second index cycle", f.wantAfterUpdate, second)
-			h.assertFeed(t, first, second)
+			if diff := cmp.Diff(f.wantAfterUpdate, rowsOf(h.stored(t))); diff != "" {
+				t.Errorf("stored rows after the second index cycle (-want +got):\n%s", diff)
+			}
+			secondFeed := h.feed(t, time.Time{})
+			for _, r := range repeats(secondFeed) {
+				t.Errorf("the second index cycle's feed carries %q twice, for %q and %q", r.moduleVersion, r.first, r.second)
+			}
+
+			// The re-index left the feed an append-only log: a module version it
+			// already carried keeps its indexed_at, and a new one gets a later one
+			// than the cursor a consumer reading the first cycle's feed would hold.
+			was := indexedAtByModuleVersion(firstFeed)
+			cursor := latestIndexedAt(firstFeed)
+			var wantNew []string
+			for _, v := range secondFeed {
+				moduleVersion := rowOf(v).moduleVersion()
+				previously, existed := was[moduleVersion]
+				if !existed {
+					if !v.IndexedAt.After(cursor) {
+						t.Errorf("%s: new row's indexed_at %v is not after the previous latest %v", moduleVersion, v.IndexedAt, cursor)
+					}
+					wantNew = append(wantNew, moduleVersion)
+					continue
+				}
+				if !v.IndexedAt.Equal(previously) {
+					t.Errorf("%s: indexed_at changed across the re-index: was %v, now %v", moduleVersion, previously, v.IndexedAt)
+				}
+			}
+
+			// The feed query is inclusive of since, so poll from just past the cursor.
+			gotNew := moduleVersionsOf(h.feed(t, cursor.Add(time.Microsecond)))
+			slices.Sort(wantNew)
+			slices.Sort(gotNew)
+			if diff := cmp.Diff(wantNew, gotNew); diff != "" {
+				t.Errorf("feed since the pre-re-index cursor (-want +got):\n%s", diff)
+			}
 		})
 	}
 }
@@ -242,8 +280,34 @@ func (h *harness) indexAll(t *testing.T) {
 	}
 }
 
-// stored reads what the /index feed reports from since onwards.
-func (h *harness) stored(t *testing.T, since time.Time) []*db.RepoModuleVersion {
+// stored reads every row of repo_module_versions, which is what a fixture's want
+// files describe. The /index feed is narrower; see [harness.feed].
+func (h *harness) stored(t *testing.T) []*db.RepoModuleVersion {
+	t.Helper()
+
+	const query = "SELECT org_repo_name, version, module_path, created, indexed_at FROM repo_module_versions"
+	rows, err := h.sqlDB.QueryContext(t.Context(), query)
+	if err != nil {
+		t.Fatalf("stored:\nquery: %s\nerror: %v", query, err)
+	}
+	defer rows.Close()
+
+	var stored []*db.RepoModuleVersion
+	for rows.Next() {
+		var v db.RepoModuleVersion
+		if err := rows.Scan(&v.OrgRepoName, &v.Version, &v.ModulePath, &v.Created, &v.IndexedAt); err != nil {
+			t.Fatalf("stored: scanning a row: %v", err)
+		}
+		stored = append(stored, &v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("stored: iterating rows: %v", err)
+	}
+	return stored
+}
+
+// feed reads what the /index feed publishes from since onwards.
+func (h *harness) feed(t *testing.T, since time.Time) []*db.RepoModuleVersion {
 	t.Helper()
 
 	// Higher than any fixture's row count, so the whole feed comes back.
@@ -255,62 +319,55 @@ func (h *harness) stored(t *testing.T, since time.Time) []*db.RepoModuleVersion 
 	return got
 }
 
-// assertRows fails if the stored module versions do not match want.
-func assertRows(t *testing.T, when string, want []row, stored []*db.RepoModuleVersion) {
-	t.Helper()
-
-	var got []row
-	for _, v := range stored {
-		got = append(got, rowOf(v))
+// moduleVersionsOf lists the module versions a feed carried.
+func moduleVersionsOf(feed []*db.RepoModuleVersion) []string {
+	var moduleVersions []string
+	for _, v := range feed {
+		moduleVersions = append(moduleVersions, rowOf(v).moduleVersion())
 	}
-	sortRows(got)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("stored rows after the %s (-want +got):\n%s", when, diff)
-	}
+	return moduleVersions
 }
 
-// assertFeed checks that a re-index left the /index feed an append-only log: rows
-// that survived keep the indexed_at they already had, rows that are new get a
-// later one, and a consumer polling from the pre-re-index cursor sees exactly the
-// new rows.
-func (h *harness) assertFeed(t *testing.T, before, after []*db.RepoModuleVersion) {
-	t.Helper()
+// indexedAtByModuleVersion maps each module version a feed carried to its
+// indexed_at.
+func indexedAtByModuleVersion(feed []*db.RepoModuleVersion) map[string]time.Time {
+	indexedAt := make(map[string]time.Time, len(feed))
+	for _, v := range feed {
+		indexedAt[rowOf(v).moduleVersion()] = v.IndexedAt
+	}
+	return indexedAt
+}
 
-	// The cursor stands in for how far a feed consumer had read before the
-	// re-index: the latest indexed_at it could have seen.
-	was := make(map[string]time.Time, len(before))
-	var cursor time.Time
-	for _, v := range before {
-		was[rowOf(v).key()] = v.IndexedAt
-		if v.IndexedAt.After(cursor) {
-			cursor = v.IndexedAt
+// latestIndexedAt is the newest indexed_at in a feed, which is how far a consumer
+// that read all of it would have advanced its cursor.
+func latestIndexedAt(feed []*db.RepoModuleVersion) time.Time {
+	var latest time.Time
+	for _, v := range feed {
+		if v.IndexedAt.After(latest) {
+			latest = v.IndexedAt
 		}
 	}
+	return latest
+}
 
-	var wantNew []string
-	for _, v := range after {
-		key := rowOf(v).key()
-		previously, existed := was[key]
-		if !existed {
-			if !v.IndexedAt.After(cursor) {
-				t.Errorf("%s: new row's indexed_at %v is not after the previous latest %v", key, v.IndexedAt, cursor)
-			}
-			wantNew = append(wantNew, key)
+// repeat is a module version a feed carried twice, and the two repos it was carried
+// for.
+type repeat struct {
+	moduleVersion string
+	first, second string
+}
+
+// repeats lists the module versions a feed carried more than once.
+func repeats(feed []*db.RepoModuleVersion) []repeat {
+	carriedFor := make(map[string]string, len(feed))
+	var repeated []repeat
+	for _, v := range feed {
+		moduleVersion := rowOf(v).moduleVersion()
+		if first, ok := carriedFor[moduleVersion]; ok {
+			repeated = append(repeated, repeat{moduleVersion, first, v.OrgRepoName})
 			continue
 		}
-		if !v.IndexedAt.Equal(previously) {
-			t.Errorf("%s: indexed_at changed across the re-index: was %v, now %v", key, previously, v.IndexedAt)
-		}
+		carriedFor[moduleVersion] = v.OrgRepoName
 	}
-
-	// The feed query is inclusive of since, so poll from just past the cursor.
-	var gotNew []string
-	for _, v := range h.stored(t, cursor.Add(time.Microsecond)) {
-		gotNew = append(gotNew, rowOf(v).key())
-	}
-	slices.Sort(wantNew)
-	slices.Sort(gotNew)
-	if diff := cmp.Diff(wantNew, gotNew); diff != "" {
-		t.Errorf("feed since the pre-re-index cursor (-want +got):\n%s", diff)
-	}
+	return repeated
 }
