@@ -140,8 +140,12 @@ func TestStoreRepoModuleVersions(t *testing.T) {
 
 	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{&preExistingTag1, &preExistingTag2, &preExistingTag3})
 
-	// newTag is new. preExistingTag2 is not included.
-	if err := sutDB.StoreRepoModuleVersions(t.Context(), []*db.RepoModuleVersion{&preExistingTag1, &newTag, &preExistingTag3}); err != nil {
+	// Each repo is stored on its own, since a call is authoritative for one repo.
+	// newTag is new. preExistingTag2 is not included, so it goes.
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), "foo/gaz", []*db.RepoModuleVersion{&preExistingTag1, &newTag}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), "foo/bar", []*db.RepoModuleVersion{&preExistingTag3}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,7 +178,7 @@ func TestStoreRepoModuleVersions_Colliding(t *testing.T) {
 		{OrgRepoName: "foo/multi", Version: pseudo, ModulePath: "github.somecompany.net/foo/multi", Created: created},
 		{OrgRepoName: "foo/multi", Version: pseudo, ModulePath: "github.somecompany.net/foo/multi/cmd/tool", Created: created},
 	}
-	if err := sutDB.StoreRepoModuleVersions(t.Context(), tags); err != nil {
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), "foo/multi", tags); err != nil {
 		t.Fatalf("StoreRepoModuleVersions with colliding pseudo-versions: %v", err)
 	}
 
@@ -182,6 +186,35 @@ func TestStoreRepoModuleVersions_Colliding(t *testing.T) {
 	want := map[string][]*db.RepoModuleVersion{"foo/multi": tags}
 	if diff := cmp.Diff(want, repoModuleVersions(t, sqlDB), byModulePath, cmpopts.EquateApproxTime(time.Second)); diff != "" {
 		t.Errorf("StoreRepoModuleVersions: -want,+got: %s", diff)
+	}
+}
+
+func TestStoreRepoModuleVersions_NoModuleVersions(t *testing.T) {
+	// A repo that yields no module versions is stored too: every row it has is stale,
+	// so they all go, and its work item is completed so it waits out the re-index
+	// period instead of being handed out again every re-indexing TTL.
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+
+	gone := &db.RepoModuleVersion{OrgRepoName: "foo/gone", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/gone", Created: time.Now().UTC()}
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{gone})
+
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), "foo/gone", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// foo/gone keeps its repos row, so it still shows up, now with no module versions.
+	want := map[string][]*db.RepoModuleVersion{"foo/gone": nil}
+	if diff := cmp.Diff(want, repoModuleVersions(t, sqlDB), cmpopts.EquateApproxTime(time.Second)); diff != "" {
+		t.Errorf("StoreRepoModuleVersions: -want,+got: %s", diff)
+	}
+
+	repoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotWork {
+		t.Errorf("NextReindexRepoTagsWork handed out %q, want no work: foo/gone finished within the reindex period", repoToReindex)
 	}
 }
 
@@ -467,7 +500,7 @@ func TestNextReindexRepoTags_Roundtrip(t *testing.T) {
 
 	// Re-index and store the result.
 	newTags := []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", Created: time.Now().Add(time.Minute)}}
-	if err := sutDB.StoreRepoModuleVersions(t.Context(), newTags); err != nil {
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), "foo/bar", newTags); err != nil {
 		t.Fatal(err)
 	}
 

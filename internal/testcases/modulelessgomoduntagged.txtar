@@ -1,0 +1,19 @@
+# A repo losing its last module version. The tag's go.mod declares a module path,
+# so the first cycle indexes it; HEAD's go.mod has no module line, so once the tag
+# is gone there is nothing left to index — not even a pseudo-version, since the
+# module directory at HEAD declares no path. The stored row is stale after that and
+# goes, and the repo's work item is still completed.
+repo someorg/nomodule
+head ff00112233445566778899aabbccddeeff001122 2026-06-07T08:09:10Z
+tag v1.0.0 2025-01-12T00:00:00Z
+
+cycle
+repo someorg/nomodule
+untag v1.0.0
+-- someorg/nomodule/go.mod --
+go 1.22
+-- someorg/nomodule@v1.0.0/go.mod --
+module go.example.com/nomodule
+-- want --
+someorg/nomodule go.example.com/nomodule v1.0.0 2025-01-12T00:00:00Z
+-- want.2 --

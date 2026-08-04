@@ -104,7 +104,10 @@ func (ix *AllReposIndexer) IndexAllReposOnce(ctx context.Context) (retryable boo
 // satisfies it.
 type repoTagsStore interface {
 	NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, err error)
-	StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*db.RepoModuleVersion) error
+	// StoreRepoModuleVersions also completes the repo's work item, which is what
+	// holds its next re-index off for ReindexPeriod rather than only ReindexTTL. It
+	// takes no module versions when the repo has none.
+	StoreRepoModuleVersions(ctx context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error
 }
 
 // RepoTagsIndexer drains the repo work queue, re-indexing one repo's module
@@ -193,12 +196,10 @@ func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retr
 	if err != nil {
 		return true, true, fmt.Errorf("error fetching repo tags for %s: %v", repoToReindex, err)
 	}
-	if len(repoModuleVersions) == 0 {
-		return true, false, nil
-	}
-
+	// A repo with no module versions is stored too, which completes its work item and
+	// drops any rows it used to have.
 	logger.Info(fmt.Sprintf("Repo tags re-indexing: storing %d module versions for repo %s", len(repoModuleVersions), repoToReindex))
-	if err := ix.DB.StoreRepoModuleVersions(ctx, repoModuleVersions); err != nil {
+	if err := ix.DB.StoreRepoModuleVersions(ctx, repoToReindex, repoModuleVersions); err != nil {
 		return true, false, fmt.Errorf("error storing repo tags: %v", err)
 	}
 	logger.Info(fmt.Sprintf("Repo tags re-indexing: stored %d module versions for repo %s", len(repoModuleVersions), repoToReindex))
@@ -216,10 +217,9 @@ func (ix *RepoTagsIndexer) repoModuleVersions(ctx context.Context, orgRepoName s
 	repoModuleVersions := make([]*db.RepoModuleVersion, 0, len(moduleVersions))
 	for _, mv := range moduleVersions {
 		repoModuleVersions = append(repoModuleVersions, &db.RepoModuleVersion{
-			OrgRepoName: orgRepoName,
-			Version:     mv.Version,
-			ModulePath:  mv.ModulePath,
-			Created:     mv.Created,
+			Version:    mv.Version,
+			ModulePath: mv.ModulePath,
+			Created:    mv.Created,
 		})
 	}
 	return repoModuleVersions, nil
