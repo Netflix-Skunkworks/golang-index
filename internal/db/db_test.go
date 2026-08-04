@@ -250,12 +250,13 @@ func TestNextReindexAllReposWork_Basic(t *testing.T) {
 	for _, tc := range reindexWorkerTestCases {
 		t.Run(tc.name, func(t *testing.T) {
 			resetTables(t, sqlDB)
-			setAllReposIndexing(t, sqlDB, time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
-			shouldReindex, err := sutDB.NextReindexAllReposWork(t.Context(), 5*time.Minute, 24*time.Hour)
+			setAllReposIndexing(t, sqlDB, tc.lastIndexingBegan, tc.lastIndexingFinished)
+
+			shouldReindex, err := sutDB.NextReindexAllReposWork(t.Context(), tc.reindexTTL, tc.reindexPeriod)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, want := shouldReindex, true; got != want {
+			if got, want := shouldReindex, tc.expectReindex; got != want {
 				t.Errorf("expected shouldReindex=%v, got %v", want, got)
 			}
 		})
@@ -286,6 +287,36 @@ func TestNextReindexAllReposWork_QuickSuccession(t *testing.T) {
 	}
 	if got, want := shouldReindex, false; got != want {
 		t.Errorf("expected shouldReindex=%v, got %v", want, got)
+	}
+}
+
+func TestNextReindexAllReposWork_Roundtrip(t *testing.T) {
+	// Storing repos completes the all-repos work item, so the re-index period holds
+	// the next pass off. The TTL below is zero, which opens the "another worker is
+	// still going" gate and leaves the period as the only thing that can.
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+	setAllReposIndexing(t, sqlDB, time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
+
+	const reindexPeriod = time.Hour
+	shouldReindex, err := sutDB.NextReindexAllReposWork(t.Context(), 5*time.Minute, reindexPeriod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shouldReindex, true; got != want {
+		t.Fatalf("expected shouldReindex=%v, got %v: a pass 24h ago is due again", want, got)
+	}
+
+	if err := sutDB.StoreRepos(t.Context(), []string{"foo/bar"}); err != nil {
+		t.Fatal(err)
+	}
+
+	shouldReindex, err = sutDB.NextReindexAllReposWork(t.Context(), 0, reindexPeriod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shouldReindex, false; got != want {
+		t.Errorf("expected shouldReindex=%v, got %v: the pass finished within the reindex period", want, got)
 	}
 }
 

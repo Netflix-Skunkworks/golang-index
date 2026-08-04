@@ -15,6 +15,8 @@ import (
 // satisfies it.
 type allReposStore interface {
 	NextReindexAllReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (shouldReindex bool, err error)
+	// StoreRepos also completes the work item, which is what holds the next pass off
+	// for ReindexPeriod rather than only ReindexTTL.
 	StoreRepos(ctx context.Context, orgRepoNames []string) error
 }
 
