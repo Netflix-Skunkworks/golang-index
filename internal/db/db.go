@@ -197,45 +197,28 @@ SET indexing_finished = NOW();`
 	return nil
 }
 
-// Store the given repo tags. It's permissable to give this function repo tags
-// for different repos.
+// Store orgRepoName's module versions, and complete its work item in the same
+// transaction, which is what holds the repo's next re-index off until the
+// re-index period has passed.
+//
+// An empty repoModuleVersions is a repo with no module versions to index, not an
+// error: its stored rows are all stale, so they all go.
 //
 // WARNING: Timezones aren't retained. Always pass UTC timezones.
 //
-// WARNING: The given repo tags are treated as authoratative: for each repo that
-// tags are given, any stored tags not in the given list will be deleted. This
-// function SHOULD NOT be provided partial updates.
-func (d *DB) StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*RepoModuleVersion) error {
-	if len(repoModuleVersions) == 0 {
-		return fmt.Errorf("StoreRepoModuleVersions called with 0 repo tags")
-	}
-
-	// Number of fields in the INSERT below, used to number its placeholders.
-	const fieldCount = 4
-
-	var valueStrings []string
-	var valueArgs []any
-	orgRepoNames := make(map[string]bool)
-	// keepRepos/keepModulePaths/keepVersions zip the authoritative incoming
-	// (org_repo_name, module_path, version) rows into parallel arrays for the
-	// delete-stale anti-join below.
-	keepRepos := make([]string, len(repoModuleVersions))
-	keepModulePaths := make([]string, len(repoModuleVersions))
-	keepVersions := make([]string, len(repoModuleVersions))
+// WARNING: The given module versions are treated as authoratative: any of the
+// repo's stored rows not in the given list will be deleted. This function SHOULD
+// NOT be provided partial updates.
+func (d *DB) StoreRepoModuleVersions(ctx context.Context, orgRepoName string, repoModuleVersions []*RepoModuleVersion) error {
+	// The incoming rows, zipped into parallel arrays so both statements below can
+	// take them as three parameters rather than three per row.
+	modulePaths := make([]string, len(repoModuleVersions))
+	versions := make([]string, len(repoModuleVersions))
+	createds := make([]string, len(repoModuleVersions))
 	for i, rt := range repoModuleVersions {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", fieldCount*i+1, fieldCount*i+2, fieldCount*i+3, fieldCount*i+4))
-		valueArgs = append(valueArgs, rt.OrgRepoName)
-		valueArgs = append(valueArgs, rt.Version)
-		valueArgs = append(valueArgs, rt.ModulePath)
-		valueArgs = append(valueArgs, rt.Created.Format(time.RFC3339))
-		orgRepoNames[rt.OrgRepoName] = true
-		keepRepos[i] = rt.OrgRepoName
-		keepModulePaths[i] = rt.ModulePath
-		keepVersions[i] = rt.Version
-	}
-	repoList := make([]string, 0, len(orgRepoNames))
-	for orgRepoName := range orgRepoNames {
-		repoList = append(repoList, orgRepoName)
+		modulePaths[i] = rt.ModulePath
+		versions[i] = rt.Version
+		createds[i] = rt.Created.Format(time.RFC3339)
 	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -245,38 +228,38 @@ func (d *DB) StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*
 	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
 
-	// Delete only STALE tags: those stored for these repos but absent from the
+	// Delete only STALE rows: those stored for this repo but absent from the
 	// authoritative incoming set. Surviving rows are kept so their first-seen
-	// indexed_at persists across re-indexing; new tags get a fresh indexed_at
+	// indexed_at persists across re-indexing; new rows get a fresh indexed_at
 	// from the column DEFAULT below.
 	query := `
 DELETE FROM repo_module_versions rt
-WHERE rt.org_repo_name = ANY($1)
+WHERE rt.org_repo_name = $1
 AND NOT EXISTS (
     SELECT 1
-    FROM unnest($2::text[], $3::text[], $4::text[]) AS keep(org_repo_name, module_path, version)
-    WHERE keep.org_repo_name = rt.org_repo_name
-    AND keep.module_path = rt.module_path
+    FROM unnest($2::text[], $3::text[]) AS keep(module_path, version)
+    WHERE keep.module_path = rt.module_path
     AND keep.version = rt.version
 );`
-	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList), pq.Array(keepRepos), pq.Array(keepModulePaths), pq.Array(keepVersions)); err != nil {
+	if _, err := tx.ExecContext(ctx, query, orgRepoName, pq.Array(modulePaths), pq.Array(versions)); err != nil {
 		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 
-	query = fmt.Sprintf(`
-INSERT INTO repo_module_versions (org_repo_name, version, module_path, created)
-VALUES %s
+	// Empty arrays select no rows, so a repo with no module versions inserts nothing.
+	query = `
+INSERT INTO repo_module_versions (org_repo_name, module_path, version, created)
+SELECT $1, * FROM unnest($2::text[], $3::text[], $4::timestamp[])
 ON CONFLICT (org_repo_name, module_path, version) DO UPDATE
-SET created = EXCLUDED.created;`, strings.Join(valueStrings, ",\n"))
-	if _, err := tx.ExecContext(ctx, query, valueArgs...); err != nil {
+SET created = EXCLUDED.created;`
+	if _, err := tx.ExecContext(ctx, query, orgRepoName, pq.Array(modulePaths), pq.Array(versions), pq.Array(createds)); err != nil {
 		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 
 	query = `
 UPDATE repos
 SET indexing_finished = NOW()
-WHERE org_repo_name = ANY($1);`
-	if _, err := tx.ExecContext(ctx, query, pq.Array(repoList)); err != nil {
+WHERE org_repo_name = $1;`
+	if _, err := tx.ExecContext(ctx, query, orgRepoName); err != nil {
 		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 

@@ -51,6 +51,9 @@ func TestIndexing(t *testing.T) {
 			for _, r := range repeats(firstFeed) {
 				t.Errorf("the first index cycle's feed carries %q twice, for %q and %q", r.moduleVersion, r.first, r.second)
 			}
+			if incomplete := h.incompleteWorkItems(t); len(incomplete) > 0 {
+				t.Errorf("work item not completed in the first index cycle for %v, want none", incomplete)
+			}
 
 			f.applyUpdate(t)
 			h.makeReindexDue(t)
@@ -62,6 +65,9 @@ func TestIndexing(t *testing.T) {
 			secondFeed := h.feed(t, time.Time{})
 			for _, r := range repeats(secondFeed) {
 				t.Errorf("the second index cycle's feed carries %q twice, for %q and %q", r.moduleVersion, r.first, r.second)
+			}
+			if incomplete := h.incompleteWorkItems(t); len(incomplete) > 0 {
+				t.Errorf("work item not completed in the second index cycle for %v, want none", incomplete)
 			}
 
 			// The re-index left the feed an append-only log: a module version it
@@ -304,6 +310,39 @@ func (h *harness) stored(t *testing.T) []*db.RepoModuleVersion {
 		t.Fatalf("stored: iterating rows: %v", err)
 	}
 	return stored
+}
+
+// incompleteWorkItems lists the repos the index cycle just run did not complete
+// the work item for, in name order. A repo lands here when indexing stored nothing
+// for it, leaving indexing_finished either at the -infinity the initial migration
+// defaults it to or at whatever makeReindexDue rewound it to — so the cutoff is any
+// time that is neither, and the re-index period can never hold its next pass off.
+func (h *harness) incompleteWorkItems(t *testing.T) []string {
+	t.Helper()
+
+	const query = `
+SELECT org_repo_name
+FROM repos
+WHERE indexing_finished < NOW() - INTERVAL '1 hour'
+ORDER BY org_repo_name`
+	rows, err := h.sqlDB.QueryContext(t.Context(), query)
+	if err != nil {
+		t.Fatalf("incompleteWorkItems:\nquery: %s\nerror: %v", query, err)
+	}
+	defer rows.Close()
+
+	var repos []string
+	for rows.Next() {
+		var orgRepoName string
+		if err := rows.Scan(&orgRepoName); err != nil {
+			t.Fatalf("incompleteWorkItems: scanning a row: %v", err)
+		}
+		repos = append(repos, orgRepoName)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("incompleteWorkItems: iterating rows: %v", err)
+	}
+	return repos
 }
 
 // feed reads what the /index feed publishes from since onwards.

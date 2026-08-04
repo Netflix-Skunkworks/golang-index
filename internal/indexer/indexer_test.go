@@ -149,7 +149,7 @@ func TestRepoTagsIndexer_StoresTags(t *testing.T) {
 	defer cancel()
 
 	date := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
-	var stored [][]*db.RepoModuleVersion
+	var stored []storeCall
 	handedOut := false
 	store := &fakeRepoTagsStore{
 		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
@@ -160,8 +160,8 @@ func TestRepoTagsIndexer_StoresTags(t *testing.T) {
 			handedOut = true
 			return "someorg/repo1", true, nil
 		},
-		storeRepoTags: func(_ context.Context, repoModuleVersions []*db.RepoModuleVersion) error {
-			stored = append(stored, repoModuleVersions)
+		storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
+			stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
 			return nil
 		},
 	}
@@ -171,18 +171,22 @@ func TestRepoTagsIndexer_StoresTags(t *testing.T) {
 		t.Errorf("Run returned %v, want context.Canceled", err)
 	}
 
-	want := [][]*db.RepoModuleVersion{{
-		{OrgRepoName: "someorg/repo1", Version: "v1.0.0", ModulePath: testModuleHost + "/someorg/repo1", Created: date},
-	}}
+	want := []storeCall{{"someorg/repo1", []*db.RepoModuleVersion{
+		{Version: "v1.0.0", ModulePath: testModuleHost + "/someorg/repo1", Created: date},
+	}}}
 	if diff := cmp.Diff(want, stored); diff != "" {
 		t.Errorf("stored repo tags mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestRepoTagsIndexer_SkipsStoreWhenNoModuleVersions(t *testing.T) {
+func TestRepoTagsIndexer_StoresWhenNoModuleVersions(t *testing.T) {
+	// A repo with no tags and no HEAD commit has no module versions, and is still
+	// stored: that completes its work item, so it waits out ReindexPeriod instead of
+	// being handed out again every ReindexTTL.
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
+	var stored []storeCall
 	handedOut := false
 	store := &fakeRepoTagsStore{
 		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
@@ -193,16 +197,19 @@ func TestRepoTagsIndexer_SkipsStoreWhenNoModuleVersions(t *testing.T) {
 			handedOut = true
 			return "someorg/repo1", true, nil
 		},
-		// No tags and no HEAD commit means no module versions, so StoreRepoModuleVersions
-		// must not be called (it errors on an empty slice).
-		storeRepoTags: func(context.Context, []*db.RepoModuleVersion) error {
-			t.Errorf("StoreRepoModuleVersions called, want no call when there are no module versions")
+		storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
+			stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
 			return nil
 		},
 	}
 
 	if err := newRepoTagsIndexer(store, &fakeSCM{}).Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+
+	want := []storeCall{{"someorg/repo1", []*db.RepoModuleVersion{}}}
+	if diff := cmp.Diff(want, stored); diff != "" {
+		t.Errorf("stored repo tags mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -211,7 +218,7 @@ func TestRepoTagsIndexer_RetriesAfterGitHubError(t *testing.T) {
 	defer cancel()
 
 	date := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
-	var stored [][]*db.RepoModuleVersion
+	var stored []storeCall
 	workCalls := 0
 	store := &fakeRepoTagsStore{
 		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
@@ -222,8 +229,8 @@ func TestRepoTagsIndexer_RetriesAfterGitHubError(t *testing.T) {
 			}
 			return "someorg/repo1", true, nil
 		},
-		storeRepoTags: func(_ context.Context, repoModuleVersions []*db.RepoModuleVersion) error {
-			stored = append(stored, repoModuleVersions)
+		storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
+			stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
 			return nil
 		},
 	}
@@ -237,9 +244,9 @@ func TestRepoTagsIndexer_RetriesAfterGitHubError(t *testing.T) {
 		t.Errorf("RepoTags called %d times, want 2 (one failure, one retry)", scm.repoTagsCalls)
 	}
 
-	want := [][]*db.RepoModuleVersion{{
-		{OrgRepoName: "someorg/repo1", Version: "v1.0.0", ModulePath: testModuleHost + "/someorg/repo1", Created: date},
-	}}
+	want := []storeCall{{"someorg/repo1", []*db.RepoModuleVersion{
+		{Version: "v1.0.0", ModulePath: testModuleHost + "/someorg/repo1", Created: date},
+	}}}
 	if diff := cmp.Diff(want, stored); diff != "" {
 		t.Errorf("stored repo tags mismatch (-want +got):\n%s", diff)
 	}

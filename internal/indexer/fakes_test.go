@@ -32,18 +32,24 @@ func (f *fakeRepoLister) GoRepos(ctx context.Context) ([]string, error) {
 	return f.goRepos(ctx)
 }
 
+// storeCall is one StoreRepoModuleVersions call a fakeRepoTagsStore recorded.
+type storeCall struct {
+	OrgRepoName        string
+	RepoModuleVersions []*db.RepoModuleVersion
+}
+
 // fakeRepoTagsStore implements repoTagsStore.
 type fakeRepoTagsStore struct {
 	nextReindexRepoTagsWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, err error)
-	storeRepoTags           func(ctx context.Context, repoModuleVersions []*db.RepoModuleVersion) error
+	storeRepoModuleVersions func(ctx context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error
 }
 
 func (f *fakeRepoTagsStore) NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (string, bool, error) {
 	return f.nextReindexRepoTagsWork(ctx, reindexTTL, reindexPeriod)
 }
 
-func (f *fakeRepoTagsStore) StoreRepoModuleVersions(ctx context.Context, repoModuleVersions []*db.RepoModuleVersion) error {
-	return f.storeRepoTags(ctx, repoModuleVersions)
+func (f *fakeRepoTagsStore) StoreRepoModuleVersions(ctx context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
+	return f.storeRepoModuleVersions(ctx, orgRepoName, repoModuleVersions)
 }
 
 // fakeSCM is an in-memory scm: it serves canned tags, HEAD, module dirs, and
