@@ -149,6 +149,8 @@ RETURNING org_repo_name;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seco
 }
 
 // Store the given repos. Afterwards, they will be ready for repo tag indexing.
+// Completes the all-repos work item in the same transaction, which is what holds
+// the next pass off until the re-index period has passed.
 //
 // TODO(jbarkhuysen): The given orgRepoNames should be treated as authoratative.
 // Any repos in GitHub not in this list should be deleted (and their repo tags).
@@ -164,13 +166,32 @@ func (d *DB) StoreRepos(ctx context.Context, orgRepoNames []string) error {
 		valueArgs = append(valueArgs, orn)
 	}
 
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("StoreRepos: %v", err)
+	}
+	// Defer a rollback in case anything fails.
+	defer tx.Rollback()
+
 	query := fmt.Sprintf(`
 INSERT INTO repos (org_repo_name)
 VALUES %s
 ON CONFLICT (org_repo_name) DO NOTHING;`, strings.Join(valueStrings, ",\n\t"))
-
-	if _, err := d.db.ExecContext(ctx, query, valueArgs...); err != nil {
+	if _, err := tx.ExecContext(ctx, query, valueArgs...); err != nil {
 		return fmt.Errorf("StoreRepos:\nquery: %s\nerror: %v", query, err)
+	}
+
+	// repo_indexing holds a single row, so this needs no WHERE; see the table's
+	// definition in the initial migration.
+	query = `
+UPDATE repo_indexing
+SET indexing_finished = NOW();`
+	if _, err := tx.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("StoreRepos:\nquery: %s\nerror: %v", query, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("StoreRepos: %v", err)
 	}
 
 	return nil
