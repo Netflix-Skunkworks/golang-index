@@ -57,8 +57,11 @@ func NewEnterpriseSCM(baseURL, githubHostName string, httpClient *http.Client) *
 
 type repoQueryResult struct {
 	Search struct {
-		Edges    []repoQueryEdge
-		PageInfo queryPageInfo
+		// RepositoryCount is how many repos match the query, which can be more than
+		// the search will hand over; see searchResultCap.
+		RepositoryCount int
+		Edges           []repoQueryEdge
+		PageInfo        queryPageInfo
 	} `graphql:"search(query: $query, type: REPOSITORY, first: 100, after: $tagsCursor)"`
 }
 
@@ -75,11 +78,83 @@ type queryPageInfo struct {
 	HasNextPage bool
 }
 
+// searchResultCap is how many results one search hands over however far a caller
+// pages. Past it the search reports no next page rather than an error, so a query
+// matching more repos than this loses the remainder silently.
+const searchResultCap = 1000
+
 // Retrieves all golang repos. Returns results as slice of "orgname/reponame".
+//
+// A search hands over at most searchResultCap repos, so this searches windows of
+// creation time instead of once for everything, halving a window that matches more
+// than the cap until each holds fewer. GitHub reports how many repos a query
+// matches even when it won't hand them all over, which is what makes the halving
+// answer to a measurement rather than a guess.
 func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
-	var results []string
+	// Wide enough on both sides that no repo falls outside: earlier than GitHub
+	// itself, and far enough ahead to include repos created during the search.
+	earliest := time.Date(2008, 1, 1, 0, 0, 0, 0, time.UTC)
+	latest := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	names, matched, err := scm.goReposCreatedBetween(ctx, earliest, latest)
+	if err != nil {
+		return nil, err
+	}
+
+	// The windows don't overlap, so a repeat means one repo was handed over twice.
+	results := make([]string, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		results = append(results, name)
+	}
+
+	if len(results) < matched {
+		slog.Warn(fmt.Sprintf("Found %d Go repos but GitHub reports %d match; some are missing from the index", len(results), matched))
+	}
+	return results, nil
+}
+
+// goReposCreatedBetween returns the Go repos created from and to inclusive, and how
+// many GitHub reports match that window. A window matching more than searchResultCap
+// is halved, since paging cannot reach past the cap. A one-second window over the
+// cap cannot be halved any further, so it comes back short.
+func (scm *GithubSCM) goReposCreatedBetween(ctx context.Context, from, to time.Time) (names []string, matched int, _ error) {
+	query := fmt.Sprintf("language:golang created:%s..%s", from.Format(time.RFC3339), to.Format(time.RFC3339))
+	names, matched, err := scm.searchRepos(ctx, query)
+	if err != nil {
+		return nil, 0, err
+	}
+	if matched <= searchResultCap {
+		return names, matched, nil
+	}
+	if !from.Before(to) {
+		slog.Warn(fmt.Sprintf("%d Go repos were created in the one second at %s, which is more than a search can return; some are missing from the index", matched, from.Format(time.RFC3339)))
+		return names, matched, nil
+	}
+
+	// Halve on a whole second, the precision GitHub records creation times at, so
+	// the two windows are adjacent with no instant falling between them.
+	mid := from.Add(to.Sub(from) / 2).Truncate(time.Second)
+	earlier, _, err := scm.goReposCreatedBetween(ctx, from, mid)
+	if err != nil {
+		return nil, 0, err
+	}
+	later, _, err := scm.goReposCreatedBetween(ctx, mid.Add(time.Second), to)
+	if err != nil {
+		return nil, 0, err
+	}
+	return append(earlier, later...), matched, nil
+}
+
+// searchRepos runs one repo search, paging to the end of what it will hand over.
+// matched is how many repos GitHub reports the query matches, which can be more.
+func (scm *GithubSCM) searchRepos(ctx context.Context, searchQuery string) (names []string, matched int, _ error) {
 	variables := map[string]any{
-		"query":      githubv4.String("language:golang"),
+		"query":      githubv4.String(searchQuery),
 		"tagsCursor": (*githubv4.String)(nil),
 	}
 
@@ -89,12 +164,12 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 		defer cancel()
 
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-			return nil, fmt.Errorf("error querying repositories: %v", err)
+			return nil, 0, fmt.Errorf("error querying repositories: %v", err)
 		}
 
 		for _, edge := range q.Search.Edges {
 			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.String()), fmt.Sprintf("https://%s/", scm.githubHostName))
-			results = append(results, string(corpName))
+			names = append(names, string(corpName))
 		}
 
 		if !q.Search.PageInfo.HasNextPage {
@@ -104,7 +179,7 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 		variables["tagsCursor"] = githubv4.NewString(q.Search.PageInfo.EndCursor)
 	}
 
-	return results, nil
+	return names, q.Search.RepositoryCount, nil
 }
 
 // tagQueryResponse fetches (and then holds response for) the tags for a repo.

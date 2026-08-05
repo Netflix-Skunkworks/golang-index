@@ -3,10 +3,12 @@ package github
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +110,71 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	if diff := cmp.Diff(wantResults, gotResults); diff != "" {
 		t.Errorf("unexpected results from repos: -want +got: %s", diff)
 	}
+}
+
+func TestGoRepos_SplitsWindowsOverTheResultCap(t *testing.T) {
+	// A search hands over at most searchResultCap repos and says nothing about the
+	// rest, so GoRepos narrows the creation-time window until every search matches
+	// fewer than that. However the windows end up drawn, every repo has to come back
+	// exactly once: a gap between two windows loses repos, an overlap repeats them.
+	createdAt := make(map[string]time.Time, 3*searchResultCap)
+	for i := range 3 * searchResultCap {
+		// Spread over years, and in pairs sharing a second, so the halving has to
+		// recurse a long way and still separate repos it cannot split apart.
+		name := fmt.Sprintf("someorg/repo%04d", i)
+		createdAt[name] = time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i/2) * time.Hour)
+	}
+
+	search := &windowedRepoSearch{t: t, createdAt: createdAt, resultCap: searchResultCap}
+	got, err := NewGithubSCM(search, "", testGithubHostname, nil).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := slices.Sorted(maps.Keys(createdAt)); !slices.Equal(slices.Sorted(slices.Values(got)), want) {
+		t.Errorf("GoRepos() returned %d repos, want the %d created: %s", len(got), len(want), firstDifference(want, slices.Sorted(slices.Values(got))))
+	}
+	if len(search.windows) < 2 {
+		t.Errorf("GoRepos() searched %d windows, want more than one: the halving never ran", len(search.windows))
+	}
+}
+
+func TestGoRepos_OneSecondOverTheResultCapComesBackShort(t *testing.T) {
+	// More repos created in the same second than a search will hand over is the one
+	// case narrowing the window cannot fix, since there is no smaller window to
+	// narrow to. GoRepos returns what it can rather than failing, because a short
+	// repo list still indexes.
+	sameInstant := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
+	createdAt := make(map[string]time.Time, searchResultCap+1)
+	for i := range searchResultCap + 1 {
+		createdAt[fmt.Sprintf("someorg/repo%04d", i)] = sameInstant
+	}
+
+	search := &windowedRepoSearch{t: t, createdAt: createdAt, resultCap: searchResultCap}
+	got, err := NewGithubSCM(search, "", testGithubHostname, nil).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != searchResultCap {
+		t.Errorf("GoRepos() returned %d repos, want %d: all %d share a second, so only the cap can come back", len(got), searchResultCap, len(createdAt))
+	}
+}
+
+// firstDifference describes where two sorted repo lists first disagree, so a
+// failure names one repo rather than printing thousands.
+func firstDifference(want, got []string) string {
+	for i := range min(len(want), len(got)) {
+		if want[i] != got[i] {
+			return fmt.Sprintf("first difference at %d: want %q, got %q", i, want[i], got[i])
+		}
+	}
+	if len(want) == len(got) {
+		return "no difference"
+	}
+	if len(want) > len(got) {
+		return fmt.Sprintf("missing from %d onwards, starting with %q", len(got), want[len(got)])
+	}
+	return fmt.Sprintf("unexpected from %d onwards, starting with %q", len(want), got[len(want)])
 }
 
 func TestRepoTags_EmptyResponse(t *testing.T) {
@@ -344,6 +411,66 @@ func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.S
 	q.Search.PageInfo.EndCursor = endCursor
 	q.Search.PageInfo.HasNextPage = hasNextPage
 	return q
+}
+
+// windowedRepoSearch answers repo searches the way GitHub's does: it honours the
+// created: window in the query, reports how many repos match it, and hands over at
+// most resultCap of them without saying it withheld any.
+type windowedRepoSearch struct {
+	t *testing.T
+	// createdAt maps a repo's "org/name" to when it was created.
+	createdAt map[string]time.Time
+	// resultCap stands in for searchResultCap, low enough that a test can exceed it.
+	resultCap int
+	// windows records the created: window of every search issued, in order, as
+	// "<from>..<to>".
+	windows []string
+}
+
+func (s *windowedRepoSearch) Query(_ context.Context, query any, variables map[string]any) error {
+	s.t.Helper()
+
+	searchQuery := string(variables["query"].(githubv4.String))
+	_, window, ok := strings.Cut(searchQuery, "created:")
+	if !ok {
+		s.t.Fatalf("search query %q has no created: window", searchQuery)
+	}
+	s.windows = append(s.windows, window)
+
+	from, to, ok := strings.Cut(window, "..")
+	if !ok {
+		s.t.Fatalf("created: window %q is not a range", window)
+	}
+	fromTime, err := time.Parse(time.RFC3339, from)
+	if err != nil {
+		s.t.Fatalf("parsing window start %q: %v", from, err)
+	}
+	toTime, err := time.Parse(time.RFC3339, to)
+	if err != nil {
+		s.t.Fatalf("parsing window end %q: %v", to, err)
+	}
+
+	var matching []string
+	for name, created := range s.createdAt {
+		if !created.Before(fromTime) && !created.After(toTime) {
+			matching = append(matching, name)
+		}
+	}
+	slices.Sort(matching)
+
+	result := query.(*repoQueryResult)
+	*result = buildRepoQueryResult(s.t, repoURLs(matching[:min(len(matching), s.resultCap)]), "", false)
+	result.Search.RepositoryCount = len(matching)
+	return nil
+}
+
+// repoURLs renders "org/name" repos as the URLs a search returns them at.
+func repoURLs(orgRepoNames []string) []string {
+	urls := make([]string, 0, len(orgRepoNames))
+	for _, name := range orgRepoNames {
+		urls = append(urls, "https://"+testGithubHostname+"/"+name)
+	}
+	return urls
 }
 
 type tagResponse struct {
