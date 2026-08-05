@@ -32,9 +32,6 @@ migrate -source file://migrations -database "postgres://$POSTGRES_USERNAME:$POST
 go run . -githubHostName=github.mycompany.net -githubAuthToken=...
 
 # ...or with mutual TLS, optionally routing through a proxy that terminates it.
-# -githubHostName is still the GitHub Enterprise host used for module paths and
-# repo URLs; -githubBaseURL is where requests are actually sent (defaults to
-# https://<githubHostName>).
 go run . \
     -githubHostName=github.mycompany.net \
     -githubBaseURL=https://gitproxy.mycompany.net \
