@@ -8,7 +8,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,20 +81,45 @@ type queryPageInfo struct {
 }
 
 // searchResultCap is how many results one search hands over however far a caller
-// pages. Past it the search reports no next page rather than an error, so a query
-// matching more repos than this loses the remainder silently.
+// pages. Past it a search reports no next page rather than an error, losing the
+// rest.
 const searchResultCap = 1000
 
 // Retrieves all golang repos. Returns results as slice of "orgname/reponame".
 //
-// A search hands over at most searchResultCap repos, so this searches windows of
-// creation time instead of once for everything, halving a window that matches more
-// than the cap until each holds fewer. GitHub reports how many repos a query
-// matches even when it won't hand them all over, which is what makes the halving
-// answer to a measurement rather than a guess.
+// The union of two searches. They overlap heavily, but neither contains the other:
+// repo search knows only the language GitHub calls a repo's primary, and code search
+// only finds repos holding a go.mod. Blocks for minutes, since GitHub allows few
+// code searches a minute.
 func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
-	// Wide enough on both sides that no repo falls outside: earlier than GitHub
-	// itself, and far enough ahead to include repos created during the search.
+	byLanguage, err := scm.goReposByLanguage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	withGoMod, err := scm.reposWithGoMod(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return dedupe(append(byLanguage, withGoMod...)), nil
+}
+
+func dedupe(orgRepoNames []string) []string {
+	unique := make([]string, 0, len(orgRepoNames))
+	seen := make(map[string]bool, len(orgRepoNames))
+	for _, name := range orgRepoNames {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		unique = append(unique, name)
+	}
+	return unique
+}
+
+// goReposByLanguage returns the repos GitHub records Go as the primary language of,
+// searching windows of creation time narrow enough to stay under searchResultCap.
+func (scm *GithubSCM) goReposByLanguage(ctx context.Context) ([]string, error) {
+	// Wider on both sides than any repo's creation time.
 	earliest := time.Date(2008, 1, 1, 0, 0, 0, 0, time.UTC)
 	latest := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -101,30 +128,20 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	// The windows don't overlap, so a repeat means one repo was handed over twice.
-	results := make([]string, 0, len(names))
-	seen := make(map[string]bool, len(names))
-	for _, name := range names {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		results = append(results, name)
-	}
-
+	results := dedupe(names)
 	if len(results) < matched {
-		slog.Warn(fmt.Sprintf("Found %d Go repos but GitHub reports %d match; some are missing from the index", len(results), matched))
+		slog.Warn(fmt.Sprintf("Found %d repos with Go as the primary language but GitHub reports %d match; some are missing from the index", len(results), matched))
 	}
 	return results, nil
 }
 
 // goReposCreatedBetween returns the Go repos created from and to inclusive, and how
-// many GitHub reports match that window. A window matching more than searchResultCap
-// is halved, since paging cannot reach past the cap. A one-second window over the
-// cap cannot be halved any further, so it comes back short.
-func (scm *GithubSCM) goReposCreatedBetween(ctx context.Context, from, to time.Time) (names []string, matched int, _ error) {
+// many GitHub reports match. An over-cap window is halved until it isn't; a
+// one-second window that still is comes back short.
+func (scm *GithubSCM) goReposCreatedBetween(ctx context.Context, from, to time.Time) ([]string, int, error) {
 	query := fmt.Sprintf("language:golang created:%s..%s", from.Format(time.RFC3339), to.Format(time.RFC3339))
-	names, matched, err := scm.searchRepos(ctx, query)
+	// An over-cap window gets halved and its results dropped, so don't page it.
+	names, matched, err := scm.searchRepos(ctx, query, from.Before(to))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -136,8 +153,8 @@ func (scm *GithubSCM) goReposCreatedBetween(ctx context.Context, from, to time.T
 		return names, matched, nil
 	}
 
-	// Halve on a whole second, the precision GitHub records creation times at, so
-	// the two windows are adjacent with no instant falling between them.
+	// Whole seconds, the precision GitHub records creation times at, so the halves
+	// are adjacent with no instant between them.
 	mid := from.Add(to.Sub(from) / 2).Truncate(time.Second)
 	earlier, _, err := scm.goReposCreatedBetween(ctx, from, mid)
 	if err != nil {
@@ -150,9 +167,12 @@ func (scm *GithubSCM) goReposCreatedBetween(ctx context.Context, from, to time.T
 	return append(earlier, later...), matched, nil
 }
 
-// searchRepos runs one repo search, paging to the end of what it will hand over.
-// matched is how many repos GitHub reports the query matches, which can be more.
-func (scm *GithubSCM) searchRepos(ctx context.Context, searchQuery string) (names []string, matched int, _ error) {
+// searchRepos runs one repo search, paging to the end of what it will hand over,
+// along with the number of repos GitHub reports the query matches, which can be
+// more. When stopWhenOverCap is set, no names come back once that count passes
+// searchResultCap.
+func (scm *GithubSCM) searchRepos(ctx context.Context, searchQuery string, stopWhenOverCap bool) ([]string, int, error) {
+	var names []string
 	variables := map[string]any{
 		"query":      githubv4.String(searchQuery),
 		"tagsCursor": (*githubv4.String)(nil),
@@ -166,10 +186,13 @@ func (scm *GithubSCM) searchRepos(ctx context.Context, searchQuery string) (name
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
 			return nil, 0, fmt.Errorf("error querying repositories: %v", err)
 		}
+		if stopWhenOverCap && q.Search.RepositoryCount > searchResultCap {
+			return nil, q.Search.RepositoryCount, nil
+		}
 
 		for _, edge := range q.Search.Edges {
-			corpName := strings.TrimPrefix(string(edge.Node.Repo.URL.String()), fmt.Sprintf("https://%s/", scm.githubHostName))
-			names = append(names, string(corpName))
+			orgRepoName := strings.TrimPrefix(edge.Node.Repo.URL.String(), fmt.Sprintf("https://%s/", scm.githubHostName))
+			names = append(names, orgRepoName)
 		}
 
 		if !q.Search.PageInfo.HasNextPage {
@@ -180,6 +203,178 @@ func (scm *GithubSCM) searchRepos(ctx context.Context, searchQuery string) (name
 	}
 
 	return names, q.Search.RepositoryCount, nil
+}
+
+// largestGoModBytes ends the size range reposWithGoMod halves. No go.mod comes
+// close to it.
+const largestGoModBytes = 64 << 10
+
+// codeSearchPageSize is the most results GitHub will put in one code search page.
+const codeSearchPageSize = 100
+
+// codeSearchRateLimitWaits bounds the waits for one page, so a refusal mistaken for
+// a rate limit cannot loop forever.
+const codeSearchRateLimitWaits = 10
+
+// codeSearchResponse is the subset of a code search response we read.
+type codeSearchResponse struct {
+	TotalCount int `json:"total_count"`
+	Items      []struct {
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+	} `json:"items"`
+}
+
+// reposWithGoMod returns the repos holding a go.mod, at any path, as "org/name".
+// Code search's only qualifier that partitions go.mod files is file size, so an
+// over-cap size range is halved the way goReposByLanguage halves a time window.
+func (scm *GithubSCM) reposWithGoMod(ctx context.Context) ([]string, error) {
+	names, matched, err := scm.reposWithGoModSized(ctx, 0, largestGoModBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	results := dedupe(names)
+	// One match per file, not per repo, so the shortfall is against the files.
+	if len(names) < matched {
+		slog.Warn(fmt.Sprintf("Found %d go.mod files but GitHub reports %d match; some repos are missing from the index", len(names), matched))
+	}
+	return results, nil
+}
+
+// reposWithGoModSized returns the repos holding a go.mod of from to to bytes
+// inclusive, one entry per file, and how many files GitHub reports match. An
+// over-cap range is halved until it isn't; a single size that still is comes back
+// short.
+func (scm *GithubSCM) reposWithGoModSized(ctx context.Context, from, to int) ([]string, int, error) {
+	query := fmt.Sprintf("filename:go.mod size:%d..%d", from, to)
+	// An over-cap range gets halved and its results dropped, so don't page it.
+	names, matched, err := scm.searchCode(ctx, query, from < to)
+	if err != nil {
+		return nil, 0, err
+	}
+	if matched <= searchResultCap {
+		return names, matched, nil
+	}
+	if from >= to {
+		slog.Warn(fmt.Sprintf("%d go.mod files are exactly %d bytes, which is more than a search can return; some repos are missing from the index", matched, from))
+		return names, matched, nil
+	}
+
+	mid := from + (to-from)/2
+	smaller, _, err := scm.reposWithGoModSized(ctx, from, mid)
+	if err != nil {
+		return nil, 0, err
+	}
+	larger, _, err := scm.reposWithGoModSized(ctx, mid+1, to)
+	if err != nil {
+		return nil, 0, err
+	}
+	return append(smaller, larger...), matched, nil
+}
+
+// searchCode runs one code search, paging to the end of what it will hand over and
+// returning the repo each result sits in, along with the number of files GitHub
+// reports the query matches, which can be more. When stopWhenOverCap is set, no
+// names come back once that count passes searchResultCap.
+func (scm *GithubSCM) searchCode(ctx context.Context, searchQuery string, stopWhenOverCap bool) ([]string, int, error) {
+	var names []string
+	var matched int
+	// Asking past the cap is an error rather than an empty page.
+	for page := 1; page <= searchResultCap/codeSearchPageSize; page++ {
+		result, err := scm.codeSearchPage(ctx, searchQuery, page)
+		if err != nil {
+			return nil, 0, err
+		}
+		matched = result.TotalCount
+		if stopWhenOverCap && matched > searchResultCap {
+			return nil, matched, nil
+		}
+		for _, item := range result.Items {
+			names = append(names, item.Repository.FullName)
+		}
+		if len(result.Items) < codeSearchPageSize {
+			break
+		}
+	}
+	return names, matched, nil
+}
+
+// codeSearchPage fetches one page of code search results, waiting out the rate
+// limit when it has been spent.
+func (scm *GithubSCM) codeSearchPage(ctx context.Context, searchQuery string, page int) (*codeSearchResponse, error) {
+	searchURL := fmt.Sprintf("%s/api/v3/search/code?q=%s&per_page=%d&page=%d",
+		scm.baseURL, url.QueryEscape(searchQuery), codeSearchPageSize, page)
+
+	for waits := 0; ; waits++ {
+		result, wait, err := scm.codeSearchAttempt(ctx, searchURL)
+		if err != nil {
+			return nil, err
+		}
+		if wait == 0 {
+			return result, nil
+		}
+		if waits == codeSearchRateLimitWaits {
+			return nil, fmt.Errorf("code search still rate limited after %d waits", waits)
+		}
+		slog.Info(fmt.Sprintf("Code search rate limit spent, waiting %v", wait.Round(time.Second)))
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// codeSearchAttempt makes one code search request. A non-zero wait means the rate
+// limiter turned it away, there is no result, and it should be repeated after that
+// long.
+func (scm *GithubSCM) codeSearchAttempt(ctx context.Context, searchURL string) (*codeSearchResponse, time.Duration, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("error building code search request: %v", err)
+	}
+	resp, err := scm.httpClient.Do(request)
+	if err != nil {
+		return nil, 0, fmt.Errorf("error querying code search: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if wait := retryAfter(resp); wait > 0 {
+		return nil, wait, nil
+	}
+	if resp.StatusCode != 200 {
+		return nil, 0, fmt.Errorf("unexpected status code from code search. Status code: %d", resp.StatusCode)
+	}
+
+	var decoded codeSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return nil, 0, fmt.Errorf("error decoding code search response: %v", err)
+	}
+	return &decoded, 0, nil
+}
+
+// retryAfter reports how long to wait before repeating a request GitHub's rate
+// limiter turned away, and zero for one it did not. GitHub signals its two limits
+// differently: the primary leaves no requests remaining and says when the window
+// resets, the secondary sends Retry-After. A refusal carrying neither is not about
+// rate, so waiting would not help.
+func retryAfter(resp *http.Response) time.Duration {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return 0
+	}
+	if after, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil {
+		return max(time.Duration(after)*time.Second, time.Second)
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") != "0" {
+		return 0
+	}
+	reset, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return max(time.Until(time.Unix(reset, 0)), time.Second)
 }
 
 // tagQueryResponse fetches (and then holds response for) the tags for a repo.

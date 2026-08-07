@@ -28,7 +28,7 @@ var githubTLSCACertFile = flag.String("githubTLSCACertFile", "", "optional CA bu
 
 var allReposReindexWorkCheckPeriod = flag.Duration("allReposReindexWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work")
 var allReposReindexPeriod = flag.Duration("allReposReindexPeriod", 24*time.Hour, "duration between re-indexing list of all repos")
-var allReposReindexTTL = flag.Duration("allReposReindexTTL", 5*time.Minute, "TTL that an indexing worker has for re-indexing list of all repos")
+var allReposReindexTTL = flag.Duration("allReposReindexTTL", 30*time.Minute, "TTL that an indexing worker has for re-indexing list of all repos. Must exceed how long an all-repos pass takes")
 
 var repoTagsReindexingWorkCheckPeriod = flag.Duration("repoTagsReindexingWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work. only occurs when no work is found: if work was previously found, instant eager re-poll occurs. note that a 1-60s jitter is added to this duration")
 var repoTagsReindexingWorkers = flag.Int("repoTagsReindexingWorkers", 10, "number of workers that concurrently perform repo tag re-indexing")

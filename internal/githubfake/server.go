@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -16,13 +17,13 @@ import (
 // indexer's DefaultModuleHost); GoRepos strips it from repo URLs.
 const Host = "github.fake.test"
 
-// BaseURL is the base URL to give the GithubSCM under test. It is never dialed —
-// [Server.Client]'s transport serves requests in memory — but its path routes to
-// the fake's handlers and its host is [Host].
+// BaseURL is the base URL to give the GithubSCM under test. It is never dialed,
+// since [Server.Client]'s transport serves requests in memory, but its path routes
+// to the fake's handlers and its host is [Host].
 const BaseURL = "https://" + Host
 
 // Server is an in-memory fake GitHub Enterprise. Build a real *github.GithubSCM
-// with [BaseURL], [Host], and [Server.Client]; it serves the GraphQL,
+// with [BaseURL], [Host], and [Server.Client]; it serves the GraphQL, code search,
 // raw-content, and git-trees surfaces the indexer uses, with no TCP socket.
 type Server struct {
 	handler http.Handler
@@ -43,6 +44,7 @@ func NewServer(repos ...*Repo) *Server {
 	mux.HandleFunc("POST /api/graphql", s.handleGraphQL)
 	mux.HandleFunc("GET /raw/{org}/{repo}/{tail...}", s.handleRaw)
 	mux.HandleFunc("GET /api/v3/repos/{org}/{repo}/git/trees/{ref...}", s.handleTrees)
+	mux.HandleFunc("GET /api/v3/search/code", s.handleCodeSearch)
 	s.handler = mux
 	return s
 }
@@ -111,6 +113,41 @@ func (s *Server) respondRepoSearch(w http.ResponseWriter) {
 	})
 }
 
+// goModSizeQuery is the code search the indexer issues, as a scan format.
+const goModSizeQuery = "filename:go.mod size:%d..%d"
+
+// handleCodeSearch answers the go.mod search the indexer issues, matching a file
+// wherever it sits in a repo. The size: range is honoured; paging is not, so a
+// fixture's go.mod files must fit one page.
+func (s *Server) handleCodeSearch(w http.ResponseWriter, r *http.Request) {
+	if page := r.URL.Query().Get("page"); page != "" && page != "1" {
+		http.Error(w, "githubfake: code search paging is not modelled", http.StatusBadRequest)
+		return
+	}
+
+	var from, to int
+	if _, err := fmt.Sscanf(r.URL.Query().Get("q"), goModSizeQuery, &from, &to); err != nil {
+		http.Error(w, fmt.Sprintf("githubfake: code search query %q: %v", r.URL.Query().Get("q"), err), http.StatusBadRequest)
+		return
+	}
+
+	items := []any{}
+	for _, name := range slices.Sorted(maps.Keys(s.repos)) {
+		repo := s.repos[name]
+		for _, filePath := range slices.Sorted(maps.Keys(repo.Files)) {
+			size := len(repo.Files[filePath])
+			if path.Base(filePath) != "go.mod" || size < from || size > to {
+				continue
+			}
+			items = append(items, map[string]any{
+				"path":       filePath,
+				"repository": map[string]any{"full_name": name},
+			})
+		}
+	}
+	writeJSON(w, map[string]any{"total_count": len(items), "items": items})
+}
+
 func (s *Server) respondHead(w http.ResponseWriter, name string) {
 	repo, ok := s.repos[name]
 	if !ok {
@@ -176,8 +213,8 @@ func (s *Server) handleTrees(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var tree []any
-	for _, path := range repo.pathsAt(r.PathValue("ref")) {
-		tree = append(tree, map[string]any{"path": path, "type": "blob"})
+	for _, filePath := range repo.pathsAt(r.PathValue("ref")) {
+		tree = append(tree, map[string]any{"path": filePath, "type": "blob"})
 	}
 	writeJSON(w, map[string]any{"tree": tree, "truncated": false})
 }

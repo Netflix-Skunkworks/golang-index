@@ -1,6 +1,7 @@
 package githubfake_test
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -43,8 +44,10 @@ func TestServerGoRepos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GoRepos: %v", err)
 	}
+	// GoRepos unions two searches, so the order it returns is an artifact of which
+	// found a repo first.
 	want := []string{"someorg/other", "someorg/thing"}
-	if diff := cmp.Diff(want, got); diff != "" {
+	if diff := cmp.Diff(want, slices.Sorted(slices.Values(got))); diff != "" {
 		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
 	}
 }

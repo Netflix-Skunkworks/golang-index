@@ -2,6 +2,8 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,19 +52,18 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 	return nil
 }
 
-func TestGoRepos_EmptyResponse(t *testing.T) {
+func TestGoReposByLanguage_EmptyResponse(t *testing.T) {
 	sut := NewGithubSCM(&mockGithubClient{}, "", testGithubHostname, nil)
-	resultsChan := make(chan string)
-	got, err := sut.GoRepos(t.Context())
+	got, err := sut.goReposByLanguage(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
-		t.Errorf("expected channel to be empty but it has %d results", len(resultsChan))
+		t.Errorf("goReposByLanguage() returned %d repos, want none", len(got))
 	}
 }
 
-func TestGoRepos_MultiplePages(t *testing.T) {
+func TestGoReposByLanguage_MultiplePages(t *testing.T) {
 	responses := []struct {
 		reposURLs   []string
 		endCursor   githubv4.String
@@ -93,7 +95,7 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 
 	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "", testGithubHostname, nil)
 
-	gotResults, err := sut.GoRepos(t.Context())
+	gotResults, err := sut.goReposByLanguage(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +114,11 @@ func TestGoRepos_MultiplePages(t *testing.T) {
 	}
 }
 
-func TestGoRepos_SplitsWindowsOverTheResultCap(t *testing.T) {
+func TestGoReposByLanguage_SplitsWindowsOverTheResultCap(t *testing.T) {
 	// A search hands over at most searchResultCap repos and says nothing about the
-	// rest, so GoRepos narrows the creation-time window until every search matches
-	// fewer than that. However the windows end up drawn, every repo has to come back
-	// exactly once: a gap between two windows loses repos, an overlap repeats them.
+	// rest, so the creation-time window is narrowed until every search matches fewer.
+	// However the windows end up drawn, every repo has to come back exactly once: a
+	// gap between two loses repos, an overlap repeats them.
 	createdAt := make(map[string]time.Time, 3*searchResultCap)
 	for i := range 3 * searchResultCap {
 		// Spread over years, and in pairs sharing a second, so the halving has to
@@ -125,38 +127,38 @@ func TestGoRepos_SplitsWindowsOverTheResultCap(t *testing.T) {
 		createdAt[name] = time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i/2) * time.Hour)
 	}
 
-	search := &windowedRepoSearch{t: t, createdAt: createdAt, resultCap: searchResultCap}
-	got, err := NewGithubSCM(search, "", testGithubHostname, nil).GoRepos(t.Context())
+	search := &windowedRepoSearch{t: t, createdAt: createdAt}
+	got, err := NewGithubSCM(search, "", testGithubHostname, nil).goReposByLanguage(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if want := slices.Sorted(maps.Keys(createdAt)); !slices.Equal(slices.Sorted(slices.Values(got)), want) {
-		t.Errorf("GoRepos() returned %d repos, want the %d created: %s", len(got), len(want), firstDifference(want, slices.Sorted(slices.Values(got))))
+		t.Errorf("goReposByLanguage() returned %d repos, want the %d created: %s", len(got), len(want), firstDifference(want, slices.Sorted(slices.Values(got))))
 	}
 	if len(search.windows) < 2 {
-		t.Errorf("GoRepos() searched %d windows, want more than one: the halving never ran", len(search.windows))
+		t.Errorf("goReposByLanguage() searched %d windows, want more than one: the halving never ran", len(search.windows))
 	}
 }
 
-func TestGoRepos_OneSecondOverTheResultCapComesBackShort(t *testing.T) {
+func TestGoReposByLanguage_OneSecondOverTheResultCapComesBackShort(t *testing.T) {
 	// More repos created in the same second than a search will hand over is the one
 	// case narrowing the window cannot fix, since there is no smaller window to
-	// narrow to. GoRepos returns what it can rather than failing, because a short
-	// repo list still indexes.
+	// narrow to. What it can find comes back rather than failing, since a short repo
+	// list still indexes.
 	sameInstant := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
 	createdAt := make(map[string]time.Time, searchResultCap+1)
 	for i := range searchResultCap + 1 {
 		createdAt[fmt.Sprintf("someorg/repo%04d", i)] = sameInstant
 	}
 
-	search := &windowedRepoSearch{t: t, createdAt: createdAt, resultCap: searchResultCap}
-	got, err := NewGithubSCM(search, "", testGithubHostname, nil).GoRepos(t.Context())
+	search := &windowedRepoSearch{t: t, createdAt: createdAt}
+	got, err := NewGithubSCM(search, "", testGithubHostname, nil).goReposByLanguage(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != searchResultCap {
-		t.Errorf("GoRepos() returned %d repos, want %d: all %d share a second, so only the cap can come back", len(got), searchResultCap, len(createdAt))
+		t.Errorf("goReposByLanguage() returned %d repos, want %d: all %d share a second, so only the cap can come back", len(got), searchResultCap, len(createdAt))
 	}
 }
 
@@ -175,6 +177,186 @@ func firstDifference(want, got []string) string {
 		return fmt.Sprintf("missing from %d onwards, starting with %q", len(got), want[len(got)])
 	}
 	return fmt.Sprintf("unexpected from %d onwards, starting with %q", len(want), got[len(want)])
+}
+
+// sizedCodeSearch serves code searches the way GitHub's does: honouring the size:
+// range, reporting the true match count, and capping what it hands over.
+type sizedCodeSearch struct {
+	t *testing.T
+	// goMods maps a go.mod's size in bytes to the repos holding one that size.
+	goMods map[int][]string
+	// firstRefusal answers the first request with these headers and a 403. Header
+	// keys must be canonical: a literal http.Header is not canonicalized.
+	firstRefusal http.Header
+	requests     int
+}
+
+func (c *sizedCodeSearch) handle(w http.ResponseWriter, r *http.Request) {
+	c.requests++
+
+	if c.firstRefusal != nil && c.requests == 1 {
+		maps.Copy(w.Header(), c.firstRefusal)
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	q := r.URL.Query()
+	var from, to int
+	_, sizeErr := fmt.Sscanf(q.Get("q"), "filename:go.mod size:%d..%d", &from, &to)
+	page, pageErr := strconv.Atoi(q.Get("page"))
+	perPage, perPageErr := strconv.Atoi(q.Get("per_page"))
+	if err := errors.Join(sizeErr, pageErr, perPageErr); err != nil {
+		// Not t.Fatal: on the server's goroutine that surfaces as a connection error.
+		c.t.Errorf("code search %q: %v", r.URL.RawQuery, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var matching []string
+	for size, repos := range c.goMods {
+		if size >= from && size <= to {
+			matching = append(matching, repos...)
+		}
+	}
+	slices.Sort(matching)
+
+	handedOver := matching[:min(len(matching), searchResultCap)]
+	start := min((page-1)*perPage, len(handedOver))
+	items := make([]map[string]any, 0, perPage)
+	for _, name := range handedOver[start:min(start+perPage, len(handedOver))] {
+		items = append(items, map[string]any{"repository": map[string]any{"full_name": name}})
+	}
+
+	if err := json.NewEncoder(w).Encode(map[string]any{"total_count": len(matching), "items": items}); err != nil {
+		c.t.Errorf("writing code search response: %v", err)
+	}
+}
+
+func scmWithSearches(t *testing.T, repoSearch *windowedRepoSearch, codeSearch *sizedCodeSearch) *GithubSCM {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(codeSearch.handle))
+	t.Cleanup(server.Close)
+	return NewGithubSCM(repoSearch, server.URL, testGithubHostname, server.Client())
+}
+
+func TestReposWithGoMod_SplitsSizeRangesOverTheResultCap(t *testing.T) {
+	// Every repo holding a go.mod has to come back, and only once: a gap between two
+	// size ranges loses repos, an overlap repeats them.
+	goMods := map[int][]string{}
+	for i := range 2 * searchResultCap {
+		// Two repos per size, and each repo holds two go.mod files of different sizes,
+		// so the halving has to split and the result has to dedupe.
+		goMods[100+i] = []string{
+			fmt.Sprintf("someorg/repo%04d", i),
+			fmt.Sprintf("someorg/repo%04d", (i+1)%(2*searchResultCap)),
+		}
+	}
+
+	search := &sizedCodeSearch{t: t, goMods: goMods}
+	got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := make([]string, 0, 2*searchResultCap)
+	for i := range 2 * searchResultCap {
+		want = append(want, fmt.Sprintf("someorg/repo%04d", i))
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
+		t.Errorf("reposWithGoMod() returned %d repos, want the %d holding a go.mod: %s", len(got), len(want), firstDifference(want, slices.Sorted(slices.Values(got))))
+	}
+}
+
+func TestReposWithGoMod_OneSizeOverTheResultCapComesBackShort(t *testing.T) {
+	// One size over the cap is the case halving cannot fix, so it comes back short.
+	repos := make([]string, 0, searchResultCap+1)
+	for i := range searchResultCap + 1 {
+		repos = append(repos, fmt.Sprintf("someorg/repo%04d", i))
+	}
+
+	search := &sizedCodeSearch{t: t, goMods: map[int][]string{42: repos}}
+	got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != searchResultCap {
+		t.Errorf("reposWithGoMod() returned %d repos, want %d: all %d go.mod files are the same size, so only the cap can come back", len(got), searchResultCap, len(repos))
+	}
+}
+
+func TestReposWithGoMod_WaitsOutTheRateLimit(t *testing.T) {
+	// Either of GitHub's two limits is waited out and repeated rather than failing.
+	primary := http.Header{
+		"X-Ratelimit-Remaining": {"0"},
+		"X-Ratelimit-Reset":     {strconv.FormatInt(time.Now().Add(time.Second).Unix(), 10)},
+	}
+	secondary := http.Header{"Retry-After": {"1"}}
+
+	for name, refusal := range map[string]http.Header{"primary": primary, "secondary": secondary} {
+		t.Run(name, func(t *testing.T) {
+			search := &sizedCodeSearch{
+				t:            t,
+				firstRefusal: refusal,
+				goMods:       map[int][]string{42: {"someorg/repo1"}},
+			}
+
+			got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{"someorg/repo1"}; !slices.Equal(got, want) {
+				t.Errorf("reposWithGoMod() = %q, want %q", got, want)
+			}
+			if search.requests < 2 {
+				t.Errorf("code search made %d requests, want the refused one to have been repeated", search.requests)
+			}
+		})
+	}
+}
+
+func TestReposWithGoMod_RefusalThatIsNotARateLimitFails(t *testing.T) {
+	// A 403 carrying neither rate-limit signal has to fail. The reset field is on
+	// every response, so reading it alone would turn any refusal into an endless retry.
+	search := &sizedCodeSearch{
+		t: t,
+		firstRefusal: http.Header{
+			"X-Ratelimit-Remaining": {"4999"},
+			"X-Ratelimit-Reset":     {strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)},
+		},
+		goMods: map[int][]string{42: {"someorg/repo1"}},
+	}
+
+	_, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
+	if err == nil {
+		t.Fatalf("reposWithGoMod() = nil error, want a failure after %d requests", search.requests)
+	}
+	if search.requests != 1 {
+		t.Errorf("code search made %d requests, want 1: a refusal that is not a rate limit is not repeated", search.requests)
+	}
+}
+
+func TestGoRepos_UnionsLanguageAndGoModSearches(t *testing.T) {
+	// Both sets come back, with a repo found by both appearing once.
+	repoSearch := &windowedRepoSearch{
+		t: t,
+		createdAt: map[string]time.Time{
+			"someorg/go-primary":    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+			"someorg/found-by-both": time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	codeSearch := &sizedCodeSearch{t: t, goMods: map[int][]string{
+		42: {"someorg/found-by-both", "someorg/java-with-a-go-module"},
+	}}
+
+	got, err := scmWithSearches(t, repoSearch, codeSearch).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"someorg/found-by-both", "someorg/go-primary", "someorg/java-with-a-go-module"}
+	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
+		t.Errorf("GoRepos() = %q, want %q", slices.Sorted(slices.Values(got)), want)
+	}
 }
 
 func TestRepoTags_EmptyResponse(t *testing.T) {
@@ -415,13 +597,11 @@ func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.S
 
 // windowedRepoSearch answers repo searches the way GitHub's does: it honours the
 // created: window in the query, reports how many repos match it, and hands over at
-// most resultCap of them without saying it withheld any.
+// most searchResultCap of them without saying it withheld any.
 type windowedRepoSearch struct {
 	t *testing.T
 	// createdAt maps a repo's "org/name" to when it was created.
 	createdAt map[string]time.Time
-	// resultCap stands in for searchResultCap, low enough that a test can exceed it.
-	resultCap int
 	// windows records the created: window of every search issued, in order, as
 	// "<from>..<to>".
 	windows []string
@@ -459,7 +639,7 @@ func (s *windowedRepoSearch) Query(_ context.Context, query any, variables map[s
 	slices.Sort(matching)
 
 	result := query.(*repoQueryResult)
-	*result = buildRepoQueryResult(s.t, repoURLs(matching[:min(len(matching), s.resultCap)]), "", false)
+	*result = buildRepoQueryResult(s.t, repoURLs(matching[:min(len(matching), searchResultCap)]), "", false)
 	result.Search.RepositoryCount = len(matching)
 	return nil
 }
