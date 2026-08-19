@@ -180,7 +180,8 @@ func firstDifference(want, got []string) string {
 }
 
 // sizedCodeSearch serves code searches the way GitHub's does: honouring the size:
-// range, reporting the true match count, and capping what it hands over.
+// range and the org: qualifier, reporting the true match count, and capping what
+// it hands over.
 type sizedCodeSearch struct {
 	t *testing.T
 	// goMods maps a go.mod's size in bytes to the repos holding one that size.
@@ -189,6 +190,9 @@ type sizedCodeSearch struct {
 	// keys must be canonical: a literal http.Header is not canonicalized.
 	firstRefusal http.Header
 	requests     int
+	// orgs are the organizations searched, in the order first seen; the empty
+	// string is an unscoped search.
+	orgs []string
 }
 
 func (c *sizedCodeSearch) handle(w http.ResponseWriter, r *http.Request) {
@@ -201,21 +205,29 @@ func (c *sizedCodeSearch) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	var from, to int
-	_, sizeErr := fmt.Sscanf(q.Get("q"), "filename:go.mod size:%d..%d", &from, &to)
+	org, from, to, queryErr := parseGoModQuery(q.Get("q"))
 	page, pageErr := strconv.Atoi(q.Get("page"))
 	perPage, perPageErr := strconv.Atoi(q.Get("per_page"))
-	if err := errors.Join(sizeErr, pageErr, perPageErr); err != nil {
+	if err := errors.Join(queryErr, pageErr, perPageErr); err != nil {
 		// Not t.Fatal: on the server's goroutine that surfaces as a connection error.
 		c.t.Errorf("code search %q: %v", r.URL.RawQuery, err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !slices.Contains(c.orgs, org) {
+		c.orgs = append(c.orgs, org)
+	}
 
 	var matching []string
 	for size, repos := range c.goMods {
-		if size >= from && size <= to {
-			matching = append(matching, repos...)
+		if size < from || size > to {
+			continue
+		}
+		for _, name := range repos {
+			// An unscoped search reaches every repo; a scoped one only its org's.
+			if org == "" || strings.HasPrefix(name, org+"/") {
+				matching = append(matching, name)
+			}
 		}
 	}
 	slices.Sort(matching)
@@ -232,12 +244,20 @@ func (c *sizedCodeSearch) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func scmWithSearches(t *testing.T, repoSearch *windowedRepoSearch, codeSearch *sizedCodeSearch) *GithubSCM {
+// parseGoModQuery reads back the code search reposWithGoMod issues. org is empty
+// when the search carries no org: qualifier.
+func parseGoModQuery(query string) (org string, from, to int, err error) {
+	query, org, _ = strings.Cut(query, " org:")
+	_, err = fmt.Sscanf(query, "filename:go.mod size:%d..%d", &from, &to)
+	return org, from, to, err
+}
+
+func scmWithSearches(t *testing.T, repoSearch *windowedRepoSearch, codeSearch *sizedCodeSearch, codeSearchOrgs ...string) *GithubSCM {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(codeSearch.handle))
 	t.Cleanup(server.Close)
-	return NewGithubSCM(repoSearch, server.URL, testGithubHostname, server.Client())
+	return NewGithubSCM(repoSearch, server.URL, testGithubHostname, server.Client(), codeSearchOrgs...)
 }
 
 func TestReposWithGoMod_SplitsSizeRangesOverTheResultCap(t *testing.T) {
@@ -282,6 +302,30 @@ func TestReposWithGoMod_OneSizeOverTheResultCapComesBackShort(t *testing.T) {
 	}
 	if len(got) != searchResultCap {
 		t.Errorf("reposWithGoMod() returned %d repos, want %d: all %d go.mod files are the same size, so only the cap can come back", len(got), searchResultCap, len(repos))
+	}
+}
+
+func TestReposWithGoMod_SearchesEachOrgOnItsOwn(t *testing.T) {
+	// An instance-wide code search is more than a proxy in front of GitHub may
+	// serve, so every configured org is searched on its own. Only their repos come
+	// back: an org: qualifier reaches nothing a user owns.
+	goMods := map[int][]string{
+		42:  {"corp/one", "actions/two", "someuser/three"},
+		100: {"corp/four"},
+	}
+
+	search := &sizedCodeSearch{t: t, goMods: goMods}
+	got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search, "corp", "actions").reposWithGoMod(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"actions/two", "corp/four", "corp/one"}
+	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
+		t.Errorf("reposWithGoMod() = %q, want %q", slices.Sorted(slices.Values(got)), want)
+	}
+	if wantOrgs := []string{"corp", "actions"}; !slices.Equal(search.orgs, wantOrgs) {
+		t.Errorf("reposWithGoMod() searched orgs %q, want %q", search.orgs, wantOrgs)
 	}
 }
 
