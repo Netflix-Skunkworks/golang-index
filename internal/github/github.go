@@ -36,15 +36,19 @@ type GithubSCM struct {
 	// URLs to yield "org/name"; it is not used to connect.
 	githubHostName string
 	httpClient     *http.Client
+	// codeSearchOrgs are the organizations reposWithGoMod searches one at a time.
+	// Empty searches the whole instance.
+	codeSearchOrgs []string
 }
 
 // Creates a new Github SCM.
-func NewGithubSCM(client githubClient, baseURL, githubHostName string, httpClient *http.Client) *GithubSCM {
+func NewGithubSCM(client githubClient, baseURL, githubHostName string, httpClient *http.Client, codeSearchOrgs ...string) *GithubSCM {
 	return &GithubSCM{
 		graphqlClient:  client,
 		baseURL:        baseURL,
 		githubHostName: githubHostName,
 		httpClient:     httpClient,
+		codeSearchOrgs: codeSearchOrgs,
 	}
 }
 
@@ -52,9 +56,11 @@ func NewGithubSCM(client githubClient, baseURL, githubHostName string, httpClien
 // GraphQL client (at baseURL+"/api/graphql") and the raw/REST calls to the same
 // httpClient. baseURL is where requests are sent (possibly a proxy);
 // githubHostName is the enterprise host used for module paths and repo URLs.
-func NewEnterpriseSCM(baseURL, githubHostName string, httpClient *http.Client) *GithubSCM {
+// codeSearchOrgs are the organizations to search for go.mod files one at a time,
+// empty for the whole instance.
+func NewEnterpriseSCM(baseURL, githubHostName string, httpClient *http.Client, codeSearchOrgs ...string) *GithubSCM {
 	graphql := githubv4.NewEnterpriseClient(baseURL+"/api/graphql", httpClient)
-	return NewGithubSCM(graphql, baseURL, githubHostName, httpClient)
+	return NewGithubSCM(graphql, baseURL, githubHostName, httpClient, codeSearchOrgs...)
 }
 
 type repoQueryResult struct {
@@ -227,12 +233,25 @@ type codeSearchResponse struct {
 }
 
 // reposWithGoMod returns the repos holding a go.mod, at any path, as "org/name".
-// Code search's only qualifier that partitions go.mod files is file size, so an
-// over-cap size range is halved the way goReposByLanguage halves a time window.
+// One search per organization in codeSearchOrgs, since an instance-wide code search
+// is more than a proxy in front of GitHub may serve. Scoping to an organization
+// reaches no user-owned repo, which then only goReposByLanguage covers; with no
+// organization configured, one instance-wide search runs instead.
 func (scm *GithubSCM) reposWithGoMod(ctx context.Context) ([]string, error) {
-	names, matched, err := scm.reposWithGoModSized(ctx, 0, largestGoModBytes)
-	if err != nil {
-		return nil, err
+	orgs := scm.codeSearchOrgs
+	if len(orgs) == 0 {
+		orgs = []string{""}
+	}
+
+	var names []string
+	var matched int
+	for _, org := range orgs {
+		orgNames, orgMatched, err := scm.reposWithGoModSized(ctx, org, 0, largestGoModBytes)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, orgNames...)
+		matched += orgMatched
 	}
 
 	results := dedupe(names)
@@ -243,12 +262,17 @@ func (scm *GithubSCM) reposWithGoMod(ctx context.Context) ([]string, error) {
 	return results, nil
 }
 
-// reposWithGoModSized returns the repos holding a go.mod of from to to bytes
-// inclusive, one entry per file, and how many files GitHub reports match. An
-// over-cap range is halved until it isn't; a single size that still is comes back
-// short.
-func (scm *GithubSCM) reposWithGoModSized(ctx context.Context, from, to int) ([]string, int, error) {
+// reposWithGoModSized returns the repos in org holding a go.mod of from to to
+// bytes inclusive, one entry per file, and how many files GitHub reports match.
+// An empty org searches the whole instance. Code search's only qualifier that
+// partitions go.mod files is file size, so an over-cap range is halved until it
+// isn't, the way goReposByLanguage halves a time window; a single size that still
+// is comes back short.
+func (scm *GithubSCM) reposWithGoModSized(ctx context.Context, org string, from, to int) ([]string, int, error) {
 	query := fmt.Sprintf("filename:go.mod size:%d..%d", from, to)
+	if org != "" {
+		query += " org:" + org
+	}
 	// An over-cap range gets halved and its results dropped, so don't page it.
 	names, matched, err := scm.searchCode(ctx, query, from < to)
 	if err != nil {
@@ -263,11 +287,11 @@ func (scm *GithubSCM) reposWithGoModSized(ctx context.Context, from, to int) ([]
 	}
 
 	mid := from + (to-from)/2
-	smaller, _, err := scm.reposWithGoModSized(ctx, from, mid)
+	smaller, _, err := scm.reposWithGoModSized(ctx, org, from, mid)
 	if err != nil {
 		return nil, 0, err
 	}
-	larger, _, err := scm.reposWithGoModSized(ctx, mid+1, to)
+	larger, _, err := scm.reposWithGoModSized(ctx, org, mid+1, to)
 	if err != nil {
 		return nil, 0, err
 	}

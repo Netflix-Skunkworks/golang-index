@@ -21,6 +21,8 @@ var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
 var githubBaseURL = flag.String("githubBaseURL", "", "base URL for API and raw requests, e.g. https://gitproxy.mycompany.net to route through a proxy. defaults to https://<githubHostName>. module paths and repo URLs always use -githubHostName")
 
+var githubCodeSearchOrgs = flag.String("githubCodeSearchOrgs", "", "comma-separated github organizations to search for repos holding a go.mod, one search each. defaults to searching the whole instance in one search, which a proxy in front of the github host may refuse. repos owned by a user rather than an organization are only found by the language search either way")
+
 var githubAuthToken = flag.String("githubAuthToken", "", "github personal access token. alternative to -githubTLSClientCertFile/-githubTLSClientKeyFile")
 var githubTLSClientCertFile = flag.String("githubTLSClientCertFile", "", "client certificate for mutual-TLS auth to the github host. alternative to -githubAuthToken")
 var githubTLSClientKeyFile = flag.String("githubTLSClientKeyFile", "", "client key for mutual-TLS auth to the github host")
@@ -68,7 +70,8 @@ func main() {
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	githubSCM := github.NewEnterpriseSCM(baseURL, *githubHostName, httpClient)
+	codeSearchOrgs := strings.FieldsFunc(*githubCodeSearchOrgs, func(r rune) bool { return r == ',' })
+	githubSCM := github.NewEnterpriseSCM(baseURL, *githubHostName, httpClient, codeSearchOrgs...)
 
 	server := newServer(*port, idb, *githubHostName)
 
