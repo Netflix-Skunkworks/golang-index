@@ -189,7 +189,10 @@ type sizedCodeSearch struct {
 	// firstRefusal answers the first request with these headers and a 403. Header
 	// keys must be canonical: a literal http.Header is not canonicalized.
 	firstRefusal http.Header
-	requests     int
+	// failureStatus, when set, answers every request with that status and no
+	// headers, the way a proxy in front of GitHub refuses a search outright.
+	failureStatus int
+	requests      int
 	// orgs are the organizations searched, in the order first seen; the empty
 	// string is an unscoped search.
 	orgs []string
@@ -201,6 +204,10 @@ func (c *sizedCodeSearch) handle(w http.ResponseWriter, r *http.Request) {
 	if c.firstRefusal != nil && c.requests == 1 {
 		maps.Copy(w.Header(), c.firstRefusal)
 		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if c.failureStatus != 0 {
+		w.WriteHeader(c.failureStatus)
 		return
 	}
 
@@ -400,6 +407,51 @@ func TestGoRepos_UnionsLanguageAndGoModSearches(t *testing.T) {
 	want := []string{"someorg/found-by-both", "someorg/go-primary", "someorg/java-with-a-go-module"}
 	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
 		t.Errorf("GoRepos() = %q, want %q", slices.Sorted(slices.Values(got)), want)
+	}
+}
+
+func TestGoRepos_ToleratesEitherSearchFailing(t *testing.T) {
+	// One search failing must not cost the other's repos: they are most of the
+	// index, and discarding them stops it moving at all until the failure clears.
+	goPrimary := map[string]time.Time{"someorg/go-primary": time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}
+	withGoMod := map[int][]string{42: {"someorg/java-with-a-go-module"}}
+
+	for name, tc := range map[string]struct {
+		repoSearch *windowedRepoSearch
+		codeSearch *sizedCodeSearch
+		want       []string
+	}{
+		"language search fails": {
+			repoSearch: &windowedRepoSearch{t: t, failure: errors.New("no repo search today")},
+			codeSearch: &sizedCodeSearch{t: t, goMods: withGoMod},
+			want:       []string{"someorg/java-with-a-go-module"},
+		},
+		"go.mod search fails": {
+			repoSearch: &windowedRepoSearch{t: t, createdAt: goPrimary},
+			codeSearch: &sizedCodeSearch{t: t, failureStatus: http.StatusTooManyRequests},
+			want:       []string{"someorg/go-primary"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := scmWithSearches(t, tc.repoSearch, tc.codeSearch).GoRepos(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("GoRepos() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGoRepos_FailsWhenBothSearchesFail(t *testing.T) {
+	// Neither half reporting anything is a failure, so the pass is retried rather
+	// than storing an empty list as if GitHub held no Go repos.
+	repoSearch := &windowedRepoSearch{t: t, failure: errors.New("no repo search today")}
+	codeSearch := &sizedCodeSearch{t: t, failureStatus: http.StatusTooManyRequests}
+
+	if _, err := scmWithSearches(t, repoSearch, codeSearch).GoRepos(t.Context()); err == nil {
+		t.Error("GoRepos() = nil error, want a failure when both searches failed")
 	}
 }
 
@@ -649,10 +701,16 @@ type windowedRepoSearch struct {
 	// windows records the created: window of every search issued, in order, as
 	// "<from>..<to>".
 	windows []string
+	// failure, when set, is returned from every search instead of results.
+	failure error
 }
 
 func (s *windowedRepoSearch) Query(_ context.Context, query any, variables map[string]any) error {
 	s.t.Helper()
+
+	if s.failure != nil {
+		return s.failure
+	}
 
 	searchQuery := string(variables["query"].(githubv4.String))
 	_, window, ok := strings.Cut(searchQuery, "created:")

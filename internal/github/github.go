@@ -97,14 +97,20 @@ const searchResultCap = 1000
 // repo search knows only the language GitHub calls a repo's primary, and code search
 // only finds repos holding a go.mod. Blocks for minutes, since GitHub allows few
 // code searches a minute.
+//
+// Either search failing still returns the other's repos, with only both failing an
+// error: StoreRepos never removes a repo, so the short list that leaves holds the
+// index where it is, where failing outright stops it moving at all.
 func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
-	byLanguage, err := scm.goReposByLanguage(ctx)
-	if err != nil {
-		return nil, err
-	}
-	withGoMod, err := scm.reposWithGoMod(ctx)
-	if err != nil {
-		return nil, err
+	byLanguage, langErr := scm.goReposByLanguage(ctx)
+	withGoMod, goModErr := scm.reposWithGoMod(ctx)
+	switch {
+	case langErr != nil && goModErr != nil:
+		return nil, fmt.Errorf("both Go repo searches failed: by language: %v; by go.mod: %v", langErr, goModErr)
+	case langErr != nil:
+		slog.Error(fmt.Sprintf("Error searching for repos by language, indexing only those holding a go.mod: %v", langErr))
+	case goModErr != nil:
+		slog.Error(fmt.Sprintf("Error searching for repos holding a go.mod, indexing only those GitHub calls Go: %v", goModErr))
 	}
 	return dedupe(append(byLanguage, withGoMod...)), nil
 }
