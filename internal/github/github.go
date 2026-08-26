@@ -112,7 +112,12 @@ func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
 	case goModErr != nil:
 		slog.Error(fmt.Sprintf("Error searching for repos holding a go.mod, indexing only those GitHub calls Go: %v", goModErr))
 	}
-	return dedupe(append(byLanguage, withGoMod...)), nil
+
+	repos := dedupe(append(byLanguage, withGoMod...))
+	// Always logged, so a search that comes back empty rather than failing shows up
+	// too.
+	slog.Info(fmt.Sprintf("Go repo searches found %d repos: %d GitHub calls Go, %d holding a go.mod", len(repos), len(byLanguage), len(withGoMod)))
+	return repos, nil
 }
 
 func dedupe(orgRepoNames []string) []string {
@@ -375,7 +380,14 @@ func (scm *GithubSCM) codeSearchAttempt(ctx context.Context, searchURL string) (
 		return nil, wait, nil
 	}
 	if resp.StatusCode != 200 {
-		return nil, 0, fmt.Errorf("unexpected status code from code search. Status code: %d", resp.StatusCode)
+		// retryAfter has just read these headers and concluded the refusal wasn't
+		// about rate. Carrying them separates a rate limit it doesn't recognize from
+		// a refusal that genuinely isn't one.
+		return nil, 0, fmt.Errorf("unexpected status code from code search. Status code: %d, Retry-After: %q, X-RateLimit-Remaining: %q, Gh-Limited-By: %q",
+			resp.StatusCode,
+			resp.Header.Get("Retry-After"),
+			resp.Header.Get("X-RateLimit-Remaining"),
+			resp.Header.Get("Gh-Limited-By"))
 	}
 
 	var decoded codeSearchResponse
