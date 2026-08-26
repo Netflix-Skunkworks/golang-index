@@ -21,8 +21,6 @@ var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
 var githubBaseURL = flag.String("githubBaseURL", "", "base URL for API and raw requests, e.g. https://gitproxy.mycompany.net to route through a proxy. defaults to https://<githubHostName>. module paths and repo URLs always use -githubHostName")
 
-var githubCodeSearchOrgs = flag.String("githubCodeSearchOrgs", "", "comma-separated github organizations to search for repos holding a go.mod, one search each. defaults to searching the whole instance in one search, which a proxy in front of the github host may refuse. repos owned by a user rather than an organization are only found by the language search either way")
-
 var githubAuthToken = flag.String("githubAuthToken", "", "github personal access token. alternative to -githubTLSClientCertFile/-githubTLSClientKeyFile")
 var githubTLSClientCertFile = flag.String("githubTLSClientCertFile", "", "client certificate for mutual-TLS auth to the github host. alternative to -githubAuthToken")
 var githubTLSClientKeyFile = flag.String("githubTLSClientKeyFile", "", "client key for mutual-TLS auth to the github host")
@@ -30,7 +28,7 @@ var githubTLSCACertFile = flag.String("githubTLSCACertFile", "", "optional CA bu
 
 var allReposReindexWorkCheckPeriod = flag.Duration("allReposReindexWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work")
 var allReposReindexPeriod = flag.Duration("allReposReindexPeriod", 24*time.Hour, "duration between re-indexing list of all repos")
-var allReposReindexTTL = flag.Duration("allReposReindexTTL", 30*time.Minute, "TTL that an indexing worker has for re-indexing list of all repos. Must exceed how long an all-repos pass takes")
+var allReposReindexTTL = flag.Duration("allReposReindexTTL", 2*time.Hour, "TTL that an indexing worker has for re-indexing list of all repos. Must exceed how long an all-repos pass takes, which is a sweep of every repo of every owner on the github host")
 
 var repoTagsReindexingWorkCheckPeriod = flag.Duration("repoTagsReindexingWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work. only occurs when no work is found: if work was previously found, instant eager re-poll occurs. note that a 1-60s jitter is added to this duration")
 var repoTagsReindexingWorkers = flag.Int("repoTagsReindexingWorkers", 10, "number of workers that concurrently perform repo tag re-indexing")
@@ -70,8 +68,7 @@ func main() {
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	codeSearchOrgs := strings.FieldsFunc(*githubCodeSearchOrgs, func(r rune) bool { return r == ',' })
-	githubSCM := github.NewEnterpriseSCM(baseURL, *githubHostName, httpClient, codeSearchOrgs...)
+	githubSCM := github.NewEnterpriseSCM(baseURL, httpClient)
 
 	server := newServer(*port, idb, *githubHostName)
 
