@@ -117,7 +117,7 @@ func newHarness(t *testing.T, repos ...*githubfake.Repo) *harness {
 	sutDB, sqlDB := freshDB(t)
 
 	srv := githubfake.NewServer(repos...)
-	scm := github.NewEnterpriseSCM(githubfake.BaseURL, githubfake.Host, srv.Client())
+	scm := github.NewEnterpriseSCM(githubfake.BaseURL, srv.Client())
 
 	return &harness{
 		db:    sutDB,

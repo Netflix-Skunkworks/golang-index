@@ -144,10 +144,10 @@ tag v1.2.0 2025-03-03T03:03:03Z
 
 ## What the fake does with a fixture
 
-`githubfake.NewServer` serves the three GitHub surfaces the indexer reads —
-GraphQL (repo search, HEAD, tags), raw file content, and the recursive git-trees
-REST endpoint — over an in-memory `*http.Client`, so a real `*github.GithubSCM`
-runs unmodified against it. The fixtures therefore exercise the production
+`githubfake.NewServer` serves the four GitHub surfaces the indexer reads over an
+in-memory `*http.Client`, so a real `*github.GithubSCM` runs unmodified against it:
+GraphQL (owner repositories, HEAD, tags), the accounts listing, raw file content,
+and the recursive git-trees REST endpoint. The fixtures therefore exercise the production
 GraphQL queries, module-path derivation, and pseudo-version synthesis; only the
 network is fake. Postgres is real (see below).
 
@@ -161,6 +161,8 @@ Simplifications worth knowing when writing a fixture:
 - **No paging.** Every GraphQL response is a single final page, so keep a fixture
   under GitHub's 100-per-page limit for tags, and this directory under it for
   repos.
+- **Every repo lists Go.** Which repos a sweep picks out is not what these
+  fixtures exercise, so the fake reports Go for all of them.
 - **Every tree entry is a blob.** `ModuleDirs` only looks at paths, so no fixture
   needs to model directories.
 

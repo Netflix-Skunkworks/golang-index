@@ -8,9 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"path"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +17,8 @@ import (
 )
 
 const queryTimeout = 10 * time.Second
+
+const sweepQueryTimeout = 60 * time.Second
 
 // githubClient wraps query interface from the shurcooL/githubv4 package so
 // that we can mock github graphql query responses in tests.
@@ -29,56 +30,29 @@ type githubClient interface {
 // A handle for specialised github querying.
 type GithubSCM struct {
 	graphqlClient githubClient
-	// baseURL is where requests are sent; it may be a proxy in front of the
-	// GitHub Enterprise host, so it can differ from githubHostName.
-	baseURL string
-	// githubHostName is the GitHub Enterprise host. GoRepos strips it from repo
-	// URLs to yield "org/name"; it is not used to connect.
-	githubHostName string
-	httpClient     *http.Client
-	// codeSearchOrgs are the organizations reposWithGoMod searches one at a time.
-	// Empty searches the whole instance.
-	codeSearchOrgs []string
+	// baseURL is where requests are sent; it may be a proxy in front of the GitHub
+	// Enterprise host, so it can differ from the host repos are named for.
+	baseURL    string
+	httpClient *http.Client
+	// retryDelay, when non-zero, replaces sweepRetryDelay so tests don't sleep.
+	retryDelay time.Duration
 }
 
-// Creates a new Github SCM.
-func NewGithubSCM(client githubClient, baseURL, githubHostName string, httpClient *http.Client, codeSearchOrgs ...string) *GithubSCM {
+// NewGithubSCM creates a new Github SCM.
+func NewGithubSCM(client githubClient, baseURL string, httpClient *http.Client) *GithubSCM {
 	return &GithubSCM{
-		graphqlClient:  client,
-		baseURL:        baseURL,
-		githubHostName: githubHostName,
-		httpClient:     httpClient,
-		codeSearchOrgs: codeSearchOrgs,
+		graphqlClient: client,
+		baseURL:       baseURL,
+		httpClient:    httpClient,
 	}
 }
 
 // NewEnterpriseSCM builds a GithubSCM for a GitHub Enterprise host, wiring the
 // GraphQL client (at baseURL+"/api/graphql") and the raw/REST calls to the same
-// httpClient. baseURL is where requests are sent (possibly a proxy);
-// githubHostName is the enterprise host used for module paths and repo URLs.
-// codeSearchOrgs are the organizations to search for go.mod files one at a time,
-// empty for the whole instance.
-func NewEnterpriseSCM(baseURL, githubHostName string, httpClient *http.Client, codeSearchOrgs ...string) *GithubSCM {
+// httpClient.
+func NewEnterpriseSCM(baseURL string, httpClient *http.Client) *GithubSCM {
 	graphql := githubv4.NewEnterpriseClient(baseURL+"/api/graphql", httpClient)
-	return NewGithubSCM(graphql, baseURL, githubHostName, httpClient, codeSearchOrgs...)
-}
-
-type repoQueryResult struct {
-	Search struct {
-		// RepositoryCount is how many repos match the query, which can be more than
-		// the search will hand over; see searchResultCap.
-		RepositoryCount int
-		Edges           []repoQueryEdge
-		PageInfo        queryPageInfo
-	} `graphql:"search(query: $query, type: REPOSITORY, first: 100, after: $tagsCursor)"`
-}
-
-type repoQueryEdge struct {
-	Node struct {
-		Repo struct {
-			URL githubv4.URI
-		} `graphql:"... on Repository"`
-	}
+	return NewGithubSCM(graphql, baseURL, httpClient)
 }
 
 type queryPageInfo struct {
@@ -86,337 +60,256 @@ type queryPageInfo struct {
 	HasNextPage bool
 }
 
-// searchResultCap is how many results one search hands over however far a caller
-// pages. Past it a search reports no next page rather than an error, losing the
-// rest.
-const searchResultCap = 1000
+// The most their APIs hand over at once.
+const (
+	ownerBatchSize   = 100
+	accountsPageSize = 100
+)
 
-// Retrieves all golang repos. Returns results as slice of "orgname/reponame".
+const (
+	batchedRepoPageSize = 20
+	ownerRepoPageSize   = 100
+)
+
+// Every page of a sweep carries the cursor to the next, so a failed page costs the
+// pages after it as well.
+const (
+	sweepQueryAttempts = 3
+	sweepRetryDelay    = 5 * time.Second
+)
+
+// A query carries a single cursor for every owner in it, so an owner paged past its
+// first page is a batch of one.
+type ownerBatch struct {
+	ownerIDs     []githubv4.ID
+	cursor       *githubv4.String
+	repoPageSize int
+}
+
+type ownerReposQuery struct {
+	Nodes []ownerNode `graphql:"nodes(ids: $ownerIDs)"`
+}
+
+type ownerNode struct {
+	Owner struct {
+		Repositories struct {
+			Nodes    []ownerRepoNode
+			PageInfo queryPageInfo
+		} `graphql:"repositories(first: $repoPageSize, isFork: false, after: $reposCursor)"`
+		ID githubv4.ID
+	} `graphql:"... on RepositoryOwner"`
+}
+
+// Owners times repositories times languages has to stay inside the 500,000 nodes a
+// query may traverse.
+type ownerRepoNode struct {
+	NameWithOwner githubv4.String
+	Languages     struct {
+		Nodes []languageNode
+	} `graphql:"languages(first: 20, orderBy: {field: SIZE, direction: DESC})"`
+	RootGoMod *struct {
+		OID githubv4.GitObjectID `graphql:"oid"`
+	} `graphql:"rootGoMod: object(expression: \"HEAD:go.mod\")"`
+}
+
+type languageNode struct {
+	Name githubv4.String
+}
+
+const goLanguage = "Go"
+
+// GoRepos retrieves all Go repos. Returns results as slice of "orgname/reponame".
 //
-// The union of two searches. They overlap heavily, but neither contains the other:
-// repo search knows only the language GitHub calls a repo's primary, and code search
-// only finds repos holding a go.mod. Blocks for minutes, since GitHub allows few
-// code searches a minute.
+// A repo counts as a Go repo when GitHub detected Go among its languages, wherever
+// Go sits in that ranking, or when it has a go.mod at its root. Forks are skipped,
+// since a fork declares the module path its upstream already declares.
 //
-// Either search failing still returns the other's repos, with only both failing an
-// error: StoreRepos never removes a repo, so the short list that leaves holds the
-// index where it is, where failing outright stops it moving at all.
+// Reads every repository owner on the host, so it blocks for minutes where there
+// are many repos.
+//
+// Owners a query can't read even on retry are left out and the sweep carries on:
+// storing a repo list never removes a repo, so the next sweep reaches them. Only
+// every query failing is an error.
 func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
-	byLanguage, langErr := scm.goReposByLanguage(ctx)
-	withGoMod, goModErr := scm.reposWithGoMod(ctx)
-	switch {
-	case langErr != nil && goModErr != nil:
-		return nil, fmt.Errorf("both Go repo searches failed: by language: %v; by go.mod: %v", langErr, goModErr)
-	case langErr != nil:
-		slog.Error(fmt.Sprintf("Error searching for repos by language, indexing only those holding a go.mod: %v", langErr))
-	case goModErr != nil:
-		slog.Error(fmt.Sprintf("Error searching for repos holding a go.mod, indexing only those GitHub calls Go: %v", goModErr))
-	}
-
-	repos := dedupe(append(byLanguage, withGoMod...))
-	// Always logged, so a search that comes back empty rather than failing shows up
-	// too.
-	slog.Info(fmt.Sprintf("Go repo searches found %d repos: %d GitHub calls Go, %d holding a go.mod", len(repos), len(byLanguage), len(withGoMod)))
-	return repos, nil
-}
-
-func dedupe(orgRepoNames []string) []string {
-	unique := make([]string, 0, len(orgRepoNames))
-	seen := make(map[string]bool, len(orgRepoNames))
-	for _, name := range orgRepoNames {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		unique = append(unique, name)
-	}
-	return unique
-}
-
-// goReposByLanguage returns the repos GitHub records Go as the primary language of,
-// searching windows of creation time narrow enough to stay under searchResultCap.
-func (scm *GithubSCM) goReposByLanguage(ctx context.Context) ([]string, error) {
-	// Wider on both sides than any repo's creation time.
-	earliest := time.Date(2008, 1, 1, 0, 0, 0, 0, time.UTC)
-	latest := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
-
-	names, matched, err := scm.goReposCreatedBetween(ctx, earliest, latest)
+	ownerIDs, err := scm.ownerIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	results := dedupe(names)
-	if len(results) < matched {
-		slog.Warn(fmt.Sprintf("Found %d repos with Go as the primary language but GitHub reports %d match; some are missing from the index", len(results), matched))
+	// Owners paged past their first page join the end, so this grows as it is read.
+	unswept := make([]ownerBatch, 0, len(ownerIDs)/ownerBatchSize+1)
+	for batch := range slices.Chunk(ownerIDs, ownerBatchSize) {
+		unswept = append(unswept, ownerBatch{ownerIDs: batch, repoPageSize: batchedRepoPageSize})
 	}
-	return results, nil
+
+	var goRepos []string
+	var failed, ownersGivenUp int
+	for i := 0; i < len(unswept); i++ {
+		names, unfinished, err := scm.goReposPage(ctx, unswept[i])
+		if err != nil {
+			// Giving up on a page gives up the pages after it too.
+			failed++
+			ownersGivenUp += len(unswept[i].ownerIDs)
+			slog.Error(err.Error())
+			continue
+		}
+		goRepos = append(goRepos, names...)
+		unswept = append(unswept, unfinished...)
+	}
+
+	if failed == len(unswept) {
+		return nil, fmt.Errorf("all %d Go repo sweep queries failed", failed)
+	}
+	slog.Info(fmt.Sprintf("Go repo sweep found %d repos listing Go across %d repository owners. %d of %d queries failed, leaving %d owners partly unread",
+		len(goRepos), len(ownerIDs), failed, len(unswept), ownersGivenUp))
+	return goRepos, nil
 }
 
-// goReposCreatedBetween returns the Go repos created from and to inclusive, and how
-// many GitHub reports match. An over-cap window is halved until it isn't; a
-// one-second window that still is comes back short.
-func (scm *GithubSCM) goReposCreatedBetween(ctx context.Context, from, to time.Time) ([]string, int, error) {
-	query := fmt.Sprintf("language:golang created:%s..%s", from.Format(time.RFC3339), to.Format(time.RFC3339))
-	// An over-cap window gets halved and its results dropped, so don't page it.
-	names, matched, err := scm.searchRepos(ctx, query, from.Before(to))
-	if err != nil {
-		return nil, 0, err
-	}
-	if matched <= searchResultCap {
-		return names, matched, nil
-	}
-	if !from.Before(to) {
-		slog.Warn(fmt.Sprintf("%d Go repos were created in the one second at %s, which is more than a search can return; some are missing from the index", matched, from.Format(time.RFC3339)))
-		return names, matched, nil
+func (scm *GithubSCM) retrying(ctx context.Context, request func() error) error {
+	delay := scm.retryDelay
+	if delay == 0 {
+		delay = sweepRetryDelay
 	}
 
-	// Whole seconds, the precision GitHub records creation times at, so the halves
-	// are adjacent with no instant between them.
-	mid := from.Add(to.Sub(from) / 2).Truncate(time.Second)
-	earlier, _, err := scm.goReposCreatedBetween(ctx, from, mid)
-	if err != nil {
-		return nil, 0, err
+	var err error
+	for attempt := range sweepQueryAttempts {
+		if attempt > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		if err = request(); err == nil {
+			return nil
+		}
+		slog.Warn(fmt.Sprintf("Retrying Go repo sweep request (attempt %d of %d): %v", attempt+1, sweepQueryAttempts, err))
 	}
-	later, _, err := scm.goReposCreatedBetween(ctx, mid.Add(time.Second), to)
-	if err != nil {
-		return nil, 0, err
-	}
-	return append(earlier, later...), matched, nil
+	return err
 }
 
-// searchRepos runs one repo search, paging to the end of what it will hand over,
-// along with the number of repos GitHub reports the query matches, which can be
-// more. When stopWhenOverCap is set, no names come back once that count passes
-// searchResultCap.
-func (scm *GithubSCM) searchRepos(ctx context.Context, searchQuery string, stopWhenOverCap bool) ([]string, int, error) {
+// goReposPage returns the "org/name" of the batch's repos holding Go, and a batch
+// for each owner whose repositories carry on past this page.
+func (scm *GithubSCM) goReposPage(ctx context.Context, batch ownerBatch) ([]string, []ownerBatch, error) {
 	var names []string
+	var unfinished []ownerBatch
+	err := scm.retrying(ctx, func() error {
+		var err error
+		names, unfinished, err = scm.goReposPageOnce(ctx, batch)
+		return err
+	})
+	return names, unfinished, err
+}
+
+func (scm *GithubSCM) goReposPageOnce(ctx context.Context, batch ownerBatch) ([]string, []ownerBatch, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, sweepQueryTimeout)
+	defer cancel()
+
+	var q ownerReposQuery
 	variables := map[string]any{
-		"query":      githubv4.String(searchQuery),
-		"tagsCursor": (*githubv4.String)(nil),
+		"ownerIDs":     batch.ownerIDs,
+		"repoPageSize": githubv4.Int(batch.repoPageSize),
+		"reposCursor":  batch.cursor,
+	}
+	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
+		return nil, nil, fmt.Errorf("error querying repositories of %d owners starting at %v: %w", len(batch.ownerIDs), batch.ownerIDs[0], err)
 	}
 
-	var q repoQueryResult
+	var names []string
+	var unfinished []ownerBatch
+	for _, node := range q.Nodes {
+		owner := node.Owner
+		for _, repo := range owner.Repositories.Nodes {
+			holdsGo := repo.RootGoMod != nil ||
+				slices.ContainsFunc(repo.Languages.Nodes, func(l languageNode) bool { return l.Name == goLanguage })
+			if holdsGo {
+				names = append(names, string(repo.NameWithOwner))
+			}
+		}
+		if owner.Repositories.PageInfo.HasNextPage {
+			unfinished = append(unfinished, ownerBatch{
+				ownerIDs:     []githubv4.ID{owner.ID},
+				cursor:       githubv4.NewString(owner.Repositories.PageInfo.EndCursor),
+				repoPageSize: ownerRepoPageSize,
+			})
+		}
+	}
+	return names, unfinished, nil
+}
+
+// NodeID identifies the account to GraphQL; ID is what pages the listing.
+type account struct {
+	ID     int    `json:"id"`
+	NodeID string `json:"node_id"`
+}
+
+// ownerIDs lists the node ID of every repository owner on the host. GitHub's
+// accounts listing holds organizations alongside users, so it alone covers every
+// owner; GraphQL offers no connection over them.
+//
+// TODO(jbarkhuysen): Give owners their own indexing stage and table, the way repos
+// have one. Enumerating them into memory on every pass ties the two together: they
+// can't be scheduled apart, a sweep that fails re-reads every account before it can
+// retry, and there is nowhere to record which owners a pass got through.
+func (scm *GithubSCM) ownerIDs(ctx context.Context) ([]githubv4.ID, error) {
+	var ids []githubv4.ID
+	// The listing pages by the id of the last account handed over, and ends with an
+	// empty page.
+	sinceID := 0
 	for {
-		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
-		defer cancel()
-
-		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-			return nil, 0, fmt.Errorf("error querying repositories: %v", err)
-		}
-		if stopWhenOverCap && q.Search.RepositoryCount > searchResultCap {
-			return nil, q.Search.RepositoryCount, nil
-		}
-
-		for _, edge := range q.Search.Edges {
-			orgRepoName := strings.TrimPrefix(edge.Node.Repo.URL.String(), fmt.Sprintf("https://%s/", scm.githubHostName))
-			names = append(names, orgRepoName)
-		}
-
-		if !q.Search.PageInfo.HasNextPage {
-			break
-		}
-
-		variables["tagsCursor"] = githubv4.NewString(q.Search.PageInfo.EndCursor)
-	}
-
-	return names, q.Search.RepositoryCount, nil
-}
-
-// largestGoModBytes ends the size range reposWithGoMod halves. No go.mod comes
-// close to it.
-const largestGoModBytes = 64 << 10
-
-// codeSearchPageSize is the most results GitHub will put in one code search page.
-const codeSearchPageSize = 100
-
-// codeSearchRateLimitWaits bounds the waits for one page, so a refusal mistaken for
-// a rate limit cannot loop forever.
-const codeSearchRateLimitWaits = 10
-
-// codeSearchResponse is the subset of a code search response we read.
-type codeSearchResponse struct {
-	TotalCount int `json:"total_count"`
-	Items      []struct {
-		Repository struct {
-			FullName string `json:"full_name"`
-		} `json:"repository"`
-	} `json:"items"`
-}
-
-// reposWithGoMod returns the repos holding a go.mod, at any path, as "org/name".
-// One search per organization in codeSearchOrgs, since an instance-wide code search
-// is more than a proxy in front of GitHub may serve. Scoping to an organization
-// reaches no user-owned repo, which then only goReposByLanguage covers; with no
-// organization configured, one instance-wide search runs instead.
-func (scm *GithubSCM) reposWithGoMod(ctx context.Context) ([]string, error) {
-	orgs := scm.codeSearchOrgs
-	if len(orgs) == 0 {
-		orgs = []string{""}
-	}
-
-	var names []string
-	var matched int
-	for _, org := range orgs {
-		orgNames, orgMatched, err := scm.reposWithGoModSized(ctx, org, 0, largestGoModBytes)
+		accounts, err := scm.accountsSince(ctx, sinceID)
 		if err != nil {
 			return nil, err
 		}
-		names = append(names, orgNames...)
-		matched += orgMatched
-	}
-
-	results := dedupe(names)
-	// One match per file, not per repo, so the shortfall is against the files.
-	if len(names) < matched {
-		slog.Warn(fmt.Sprintf("Found %d go.mod files but GitHub reports %d match; some repos are missing from the index", len(names), matched))
-	}
-	return results, nil
-}
-
-// reposWithGoModSized returns the repos in org holding a go.mod of from to to
-// bytes inclusive, one entry per file, and how many files GitHub reports match.
-// An empty org searches the whole instance. Code search's only qualifier that
-// partitions go.mod files is file size, so an over-cap range is halved until it
-// isn't, the way goReposByLanguage halves a time window; a single size that still
-// is comes back short.
-func (scm *GithubSCM) reposWithGoModSized(ctx context.Context, org string, from, to int) ([]string, int, error) {
-	query := fmt.Sprintf("filename:go.mod size:%d..%d", from, to)
-	if org != "" {
-		query += " org:" + org
-	}
-	// An over-cap range gets halved and its results dropped, so don't page it.
-	names, matched, err := scm.searchCode(ctx, query, from < to)
-	if err != nil {
-		return nil, 0, err
-	}
-	if matched <= searchResultCap {
-		return names, matched, nil
-	}
-	if from >= to {
-		slog.Warn(fmt.Sprintf("%d go.mod files are exactly %d bytes, which is more than a search can return; some repos are missing from the index", matched, from))
-		return names, matched, nil
-	}
-
-	mid := from + (to-from)/2
-	smaller, _, err := scm.reposWithGoModSized(ctx, org, from, mid)
-	if err != nil {
-		return nil, 0, err
-	}
-	larger, _, err := scm.reposWithGoModSized(ctx, org, mid+1, to)
-	if err != nil {
-		return nil, 0, err
-	}
-	return append(smaller, larger...), matched, nil
-}
-
-// searchCode runs one code search, paging to the end of what it will hand over and
-// returning the repo each result sits in, along with the number of files GitHub
-// reports the query matches, which can be more. When stopWhenOverCap is set, no
-// names come back once that count passes searchResultCap.
-func (scm *GithubSCM) searchCode(ctx context.Context, searchQuery string, stopWhenOverCap bool) ([]string, int, error) {
-	var names []string
-	var matched int
-	// Asking past the cap is an error rather than an empty page.
-	for page := 1; page <= searchResultCap/codeSearchPageSize; page++ {
-		result, err := scm.codeSearchPage(ctx, searchQuery, page)
-		if err != nil {
-			return nil, 0, err
+		if len(accounts) == 0 {
+			return ids, nil
 		}
-		matched = result.TotalCount
-		if stopWhenOverCap && matched > searchResultCap {
-			return nil, matched, nil
+		for _, a := range accounts {
+			ids = append(ids, githubv4.ID(a.NodeID))
 		}
-		for _, item := range result.Items {
-			names = append(names, item.Repository.FullName)
-		}
-		if len(result.Items) < codeSearchPageSize {
-			break
-		}
-	}
-	return names, matched, nil
-}
-
-// codeSearchPage fetches one page of code search results, waiting out the rate
-// limit when it has been spent.
-func (scm *GithubSCM) codeSearchPage(ctx context.Context, searchQuery string, page int) (*codeSearchResponse, error) {
-	searchURL := fmt.Sprintf("%s/api/v3/search/code?q=%s&per_page=%d&page=%d",
-		scm.baseURL, url.QueryEscape(searchQuery), codeSearchPageSize, page)
-
-	for waits := 0; ; waits++ {
-		result, wait, err := scm.codeSearchAttempt(ctx, searchURL)
-		if err != nil {
-			return nil, err
-		}
-		if wait == 0 {
-			return result, nil
-		}
-		if waits == codeSearchRateLimitWaits {
-			return nil, fmt.Errorf("code search still rate limited after %d waits", waits)
-		}
-		slog.Info(fmt.Sprintf("Code search rate limit spent, waiting %v", wait.Round(time.Second)))
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+		sinceID = accounts[len(accounts)-1].ID
 	}
 }
 
-// codeSearchAttempt makes one code search request. A non-zero wait means the rate
-// limiter turned it away, there is no result, and it should be repeated after that
-// long.
-func (scm *GithubSCM) codeSearchAttempt(ctx context.Context, searchURL string) (*codeSearchResponse, time.Duration, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+func (scm *GithubSCM) accountsSince(ctx context.Context, sinceID int) ([]account, error) {
+	var accounts []account
+	err := scm.retrying(ctx, func() error {
+		var err error
+		accounts, err = scm.accountsPage(ctx, sinceID)
+		return err
+	})
+	return accounts, err
+}
+
+func (scm *GithubSCM) accountsPage(ctx context.Context, sinceID int) ([]account, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, sweepQueryTimeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(
+		queryCtx,
+		http.MethodGet,
+		fmt.Sprintf("%s/api/v3/users?since=%d&per_page=%d", scm.baseURL, sinceID, accountsPageSize),
+		nil,
+	)
 	if err != nil {
-		return nil, 0, fmt.Errorf("error building code search request: %v", err)
+		return nil, fmt.Errorf("error building accounts request: %w", err)
 	}
+
 	resp, err := scm.httpClient.Do(request)
 	if err != nil {
-		return nil, 0, fmt.Errorf("error querying code search: %w", err)
+		return nil, fmt.Errorf("error querying accounts: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if wait := retryAfter(resp); wait > 0 {
-		return nil, wait, nil
-	}
-	if resp.StatusCode != 200 {
-		// retryAfter has just read these headers and concluded the refusal wasn't
-		// about rate. Carrying them separates a rate limit it doesn't recognize from
-		// a refusal that genuinely isn't one.
-		return nil, 0, fmt.Errorf("unexpected status code from code search. Status code: %d, Retry-After: %q, X-RateLimit-Remaining: %q, Gh-Limited-By: %q",
-			resp.StatusCode,
-			resp.Header.Get("Retry-After"),
-			resp.Header.Get("X-RateLimit-Remaining"),
-			resp.Header.Get("Gh-Limited-By"))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d listing accounts", resp.StatusCode)
 	}
 
-	var decoded codeSearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, 0, fmt.Errorf("error decoding code search response: %v", err)
+	var accounts []account
+	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
+		return nil, fmt.Errorf("error decoding accounts response: %w", err)
 	}
-	return &decoded, 0, nil
-}
-
-// retryAfter reports how long to wait before repeating a request GitHub's rate
-// limiter turned away, and zero for one it did not. GitHub signals its two limits
-// differently: the primary leaves no requests remaining and says when the window
-// resets, the secondary sends Retry-After. A refusal carrying neither is not about
-// rate, so waiting would not help.
-func retryAfter(resp *http.Response) time.Duration {
-	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
-		return 0
-	}
-	if after, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil {
-		return max(time.Duration(after)*time.Second, time.Second)
-	}
-	if resp.Header.Get("X-RateLimit-Remaining") != "0" {
-		return 0
-	}
-	reset, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return max(time.Until(time.Unix(reset, 0)), time.Second)
+	return accounts, nil
 }
 
 // tagQueryResponse fetches (and then holds response for) the tags for a repo.

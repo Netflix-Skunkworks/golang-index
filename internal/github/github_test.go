@@ -3,12 +3,10 @@ package github
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -19,8 +17,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/shurcooL/githubv4"
 )
-
-const testGithubHostname = "github.somecompany.net"
 
 type mockGithubClient struct {
 	// index pointer for the stubResults slice
@@ -52,411 +48,8 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 	return nil
 }
 
-func TestGoReposByLanguage_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, "", testGithubHostname, nil)
-	got, err := sut.goReposByLanguage(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Errorf("goReposByLanguage() returned %d repos, want none", len(got))
-	}
-}
-
-func TestGoReposByLanguage_MultiplePages(t *testing.T) {
-	responses := []struct {
-		reposURLs   []string
-		endCursor   githubv4.String
-		hasNextPage bool
-	}{
-		{
-			reposURLs: []string{
-				"https://github.somecompany.net/someorg/ftl-proxy",
-				"https://github.somecompany.net/someorg/cloudgaming-ocgactl",
-				"https://github.somecompany.net/someorg/cloudgaming-moby-fork",
-			},
-			hasNextPage: true,
-			endCursor:   "somecursor",
-		},
-		{
-			reposURLs: []string{
-				"https://github.somecompany.net/someorg/cloudgaming-tdd-grafana",
-				"https://github.somecompany.net/someorg/cloudgaming-game-input-go",
-				"https://github.somecompany.net/someorg/cpie-proxyd",
-			},
-		},
-	}
-
-	var stubbedResponses []any
-	for _, response := range responses {
-		response := buildRepoQueryResult(t, response.reposURLs, response.endCursor, response.hasNextPage)
-		stubbedResponses = append(stubbedResponses, response)
-	}
-
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "", testGithubHostname, nil)
-
-	gotResults, err := sut.goReposByLanguage(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	wantResults := []string{
-		"someorg/ftl-proxy",
-		"someorg/cloudgaming-ocgactl",
-		"someorg/cloudgaming-moby-fork",
-		"someorg/cloudgaming-tdd-grafana",
-		"someorg/cloudgaming-game-input-go",
-		"someorg/cpie-proxyd",
-	}
-
-	if diff := cmp.Diff(wantResults, gotResults); diff != "" {
-		t.Errorf("unexpected results from repos: -want +got: %s", diff)
-	}
-}
-
-func TestGoReposByLanguage_SplitsWindowsOverTheResultCap(t *testing.T) {
-	// A search hands over at most searchResultCap repos and says nothing about the
-	// rest, so the creation-time window is narrowed until every search matches fewer.
-	// However the windows end up drawn, every repo has to come back exactly once: a
-	// gap between two loses repos, an overlap repeats them.
-	createdAt := make(map[string]time.Time, 3*searchResultCap)
-	for i := range 3 * searchResultCap {
-		// Spread over years, and in pairs sharing a second, so the halving has to
-		// recurse a long way and still separate repos it cannot split apart.
-		name := fmt.Sprintf("someorg/repo%04d", i)
-		createdAt[name] = time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i/2) * time.Hour)
-	}
-
-	search := &windowedRepoSearch{t: t, createdAt: createdAt}
-	got, err := NewGithubSCM(search, "", testGithubHostname, nil).goReposByLanguage(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if want := slices.Sorted(maps.Keys(createdAt)); !slices.Equal(slices.Sorted(slices.Values(got)), want) {
-		t.Errorf("goReposByLanguage() returned %d repos, want the %d created: %s", len(got), len(want), firstDifference(want, slices.Sorted(slices.Values(got))))
-	}
-	if len(search.windows) < 2 {
-		t.Errorf("goReposByLanguage() searched %d windows, want more than one: the halving never ran", len(search.windows))
-	}
-}
-
-func TestGoReposByLanguage_OneSecondOverTheResultCapComesBackShort(t *testing.T) {
-	// More repos created in the same second than a search will hand over is the one
-	// case narrowing the window cannot fix, since there is no smaller window to
-	// narrow to. What it can find comes back rather than failing, since a short repo
-	// list still indexes.
-	sameInstant := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
-	createdAt := make(map[string]time.Time, searchResultCap+1)
-	for i := range searchResultCap + 1 {
-		createdAt[fmt.Sprintf("someorg/repo%04d", i)] = sameInstant
-	}
-
-	search := &windowedRepoSearch{t: t, createdAt: createdAt}
-	got, err := NewGithubSCM(search, "", testGithubHostname, nil).goReposByLanguage(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != searchResultCap {
-		t.Errorf("goReposByLanguage() returned %d repos, want %d: all %d share a second, so only the cap can come back", len(got), searchResultCap, len(createdAt))
-	}
-}
-
-// firstDifference describes where two sorted repo lists first disagree, so a
-// failure names one repo rather than printing thousands.
-func firstDifference(want, got []string) string {
-	for i := range min(len(want), len(got)) {
-		if want[i] != got[i] {
-			return fmt.Sprintf("first difference at %d: want %q, got %q", i, want[i], got[i])
-		}
-	}
-	if len(want) == len(got) {
-		return "no difference"
-	}
-	if len(want) > len(got) {
-		return fmt.Sprintf("missing from %d onwards, starting with %q", len(got), want[len(got)])
-	}
-	return fmt.Sprintf("unexpected from %d onwards, starting with %q", len(want), got[len(want)])
-}
-
-// sizedCodeSearch serves code searches the way GitHub's does: honouring the size:
-// range and the org: qualifier, reporting the true match count, and capping what
-// it hands over.
-type sizedCodeSearch struct {
-	t *testing.T
-	// goMods maps a go.mod's size in bytes to the repos holding one that size.
-	goMods map[int][]string
-	// firstRefusal answers the first request with these headers and a 403. Header
-	// keys must be canonical: a literal http.Header is not canonicalized.
-	firstRefusal http.Header
-	// failureStatus, when set, answers every request with that status and no
-	// headers, the way a proxy in front of GitHub refuses a search outright.
-	failureStatus int
-	requests      int
-	// orgs are the organizations searched, in the order first seen; the empty
-	// string is an unscoped search.
-	orgs []string
-}
-
-func (c *sizedCodeSearch) handle(w http.ResponseWriter, r *http.Request) {
-	c.requests++
-
-	if c.firstRefusal != nil && c.requests == 1 {
-		maps.Copy(w.Header(), c.firstRefusal)
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	if c.failureStatus != 0 {
-		w.WriteHeader(c.failureStatus)
-		return
-	}
-
-	q := r.URL.Query()
-	org, from, to, queryErr := parseGoModQuery(q.Get("q"))
-	page, pageErr := strconv.Atoi(q.Get("page"))
-	perPage, perPageErr := strconv.Atoi(q.Get("per_page"))
-	if err := errors.Join(queryErr, pageErr, perPageErr); err != nil {
-		// Not t.Fatal: on the server's goroutine that surfaces as a connection error.
-		c.t.Errorf("code search %q: %v", r.URL.RawQuery, err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if !slices.Contains(c.orgs, org) {
-		c.orgs = append(c.orgs, org)
-	}
-
-	var matching []string
-	for size, repos := range c.goMods {
-		if size < from || size > to {
-			continue
-		}
-		for _, name := range repos {
-			// An unscoped search reaches every repo; a scoped one only its org's.
-			if org == "" || strings.HasPrefix(name, org+"/") {
-				matching = append(matching, name)
-			}
-		}
-	}
-	slices.Sort(matching)
-
-	handedOver := matching[:min(len(matching), searchResultCap)]
-	start := min((page-1)*perPage, len(handedOver))
-	items := make([]map[string]any, 0, perPage)
-	for _, name := range handedOver[start:min(start+perPage, len(handedOver))] {
-		items = append(items, map[string]any{"repository": map[string]any{"full_name": name}})
-	}
-
-	if err := json.NewEncoder(w).Encode(map[string]any{"total_count": len(matching), "items": items}); err != nil {
-		c.t.Errorf("writing code search response: %v", err)
-	}
-}
-
-// parseGoModQuery reads back the code search reposWithGoMod issues. org is empty
-// when the search carries no org: qualifier.
-func parseGoModQuery(query string) (org string, from, to int, err error) {
-	query, org, _ = strings.Cut(query, " org:")
-	_, err = fmt.Sscanf(query, "filename:go.mod size:%d..%d", &from, &to)
-	return org, from, to, err
-}
-
-func scmWithSearches(t *testing.T, repoSearch *windowedRepoSearch, codeSearch *sizedCodeSearch, codeSearchOrgs ...string) *GithubSCM {
-	t.Helper()
-
-	server := httptest.NewServer(http.HandlerFunc(codeSearch.handle))
-	t.Cleanup(server.Close)
-	return NewGithubSCM(repoSearch, server.URL, testGithubHostname, server.Client(), codeSearchOrgs...)
-}
-
-func TestReposWithGoMod_SplitsSizeRangesOverTheResultCap(t *testing.T) {
-	// Every repo holding a go.mod has to come back, and only once: a gap between two
-	// size ranges loses repos, an overlap repeats them.
-	goMods := map[int][]string{}
-	for i := range 2 * searchResultCap {
-		// Two repos per size, and each repo holds two go.mod files of different sizes,
-		// so the halving has to split and the result has to dedupe.
-		goMods[100+i] = []string{
-			fmt.Sprintf("someorg/repo%04d", i),
-			fmt.Sprintf("someorg/repo%04d", (i+1)%(2*searchResultCap)),
-		}
-	}
-
-	search := &sizedCodeSearch{t: t, goMods: goMods}
-	got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := make([]string, 0, 2*searchResultCap)
-	for i := range 2 * searchResultCap {
-		want = append(want, fmt.Sprintf("someorg/repo%04d", i))
-	}
-	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
-		t.Errorf("reposWithGoMod() returned %d repos, want the %d holding a go.mod: %s", len(got), len(want), firstDifference(want, slices.Sorted(slices.Values(got))))
-	}
-}
-
-func TestReposWithGoMod_OneSizeOverTheResultCapComesBackShort(t *testing.T) {
-	// One size over the cap is the case halving cannot fix, so it comes back short.
-	repos := make([]string, 0, searchResultCap+1)
-	for i := range searchResultCap + 1 {
-		repos = append(repos, fmt.Sprintf("someorg/repo%04d", i))
-	}
-
-	search := &sizedCodeSearch{t: t, goMods: map[int][]string{42: repos}}
-	got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != searchResultCap {
-		t.Errorf("reposWithGoMod() returned %d repos, want %d: all %d go.mod files are the same size, so only the cap can come back", len(got), searchResultCap, len(repos))
-	}
-}
-
-func TestReposWithGoMod_SearchesEachOrgOnItsOwn(t *testing.T) {
-	// An instance-wide code search is more than a proxy in front of GitHub may
-	// serve, so every configured org is searched on its own. Only their repos come
-	// back: an org: qualifier reaches nothing a user owns.
-	goMods := map[int][]string{
-		42:  {"corp/one", "actions/two", "someuser/three"},
-		100: {"corp/four"},
-	}
-
-	search := &sizedCodeSearch{t: t, goMods: goMods}
-	got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search, "corp", "actions").reposWithGoMod(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{"actions/two", "corp/four", "corp/one"}
-	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
-		t.Errorf("reposWithGoMod() = %q, want %q", slices.Sorted(slices.Values(got)), want)
-	}
-	if wantOrgs := []string{"corp", "actions"}; !slices.Equal(search.orgs, wantOrgs) {
-		t.Errorf("reposWithGoMod() searched orgs %q, want %q", search.orgs, wantOrgs)
-	}
-}
-
-func TestReposWithGoMod_WaitsOutTheRateLimit(t *testing.T) {
-	// Either of GitHub's two limits is waited out and repeated rather than failing.
-	primary := http.Header{
-		"X-Ratelimit-Remaining": {"0"},
-		"X-Ratelimit-Reset":     {strconv.FormatInt(time.Now().Add(time.Second).Unix(), 10)},
-	}
-	secondary := http.Header{"Retry-After": {"1"}}
-
-	for name, refusal := range map[string]http.Header{"primary": primary, "secondary": secondary} {
-		t.Run(name, func(t *testing.T) {
-			search := &sizedCodeSearch{
-				t:            t,
-				firstRefusal: refusal,
-				goMods:       map[int][]string{42: {"someorg/repo1"}},
-			}
-
-			got, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if want := []string{"someorg/repo1"}; !slices.Equal(got, want) {
-				t.Errorf("reposWithGoMod() = %q, want %q", got, want)
-			}
-			if search.requests < 2 {
-				t.Errorf("code search made %d requests, want the refused one to have been repeated", search.requests)
-			}
-		})
-	}
-}
-
-func TestReposWithGoMod_RefusalThatIsNotARateLimitFails(t *testing.T) {
-	// A 403 carrying neither rate-limit signal has to fail. The reset field is on
-	// every response, so reading it alone would turn any refusal into an endless retry.
-	search := &sizedCodeSearch{
-		t: t,
-		firstRefusal: http.Header{
-			"X-Ratelimit-Remaining": {"4999"},
-			"X-Ratelimit-Reset":     {strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)},
-		},
-		goMods: map[int][]string{42: {"someorg/repo1"}},
-	}
-
-	_, err := scmWithSearches(t, &windowedRepoSearch{t: t}, search).reposWithGoMod(t.Context())
-	if err == nil {
-		t.Fatalf("reposWithGoMod() = nil error, want a failure after %d requests", search.requests)
-	}
-	if search.requests != 1 {
-		t.Errorf("code search made %d requests, want 1: a refusal that is not a rate limit is not repeated", search.requests)
-	}
-}
-
-func TestGoRepos_UnionsLanguageAndGoModSearches(t *testing.T) {
-	// Both sets come back, with a repo found by both appearing once.
-	repoSearch := &windowedRepoSearch{
-		t: t,
-		createdAt: map[string]time.Time{
-			"someorg/go-primary":    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-			"someorg/found-by-both": time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC),
-		},
-	}
-	codeSearch := &sizedCodeSearch{t: t, goMods: map[int][]string{
-		42: {"someorg/found-by-both", "someorg/java-with-a-go-module"},
-	}}
-
-	got, err := scmWithSearches(t, repoSearch, codeSearch).GoRepos(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"someorg/found-by-both", "someorg/go-primary", "someorg/java-with-a-go-module"}
-	if !slices.Equal(slices.Sorted(slices.Values(got)), want) {
-		t.Errorf("GoRepos() = %q, want %q", slices.Sorted(slices.Values(got)), want)
-	}
-}
-
-func TestGoRepos_ToleratesEitherSearchFailing(t *testing.T) {
-	// One search failing must not cost the other's repos: they are most of the
-	// index, and discarding them stops it moving at all until the failure clears.
-	goPrimary := map[string]time.Time{"someorg/go-primary": time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}
-	withGoMod := map[int][]string{42: {"someorg/java-with-a-go-module"}}
-
-	for name, tc := range map[string]struct {
-		repoSearch *windowedRepoSearch
-		codeSearch *sizedCodeSearch
-		want       []string
-	}{
-		"language search fails": {
-			repoSearch: &windowedRepoSearch{t: t, failure: errors.New("no repo search today")},
-			codeSearch: &sizedCodeSearch{t: t, goMods: withGoMod},
-			want:       []string{"someorg/java-with-a-go-module"},
-		},
-		"go.mod search fails": {
-			repoSearch: &windowedRepoSearch{t: t, createdAt: goPrimary},
-			codeSearch: &sizedCodeSearch{t: t, failureStatus: http.StatusTooManyRequests},
-			want:       []string{"someorg/go-primary"},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			got, err := scmWithSearches(t, tc.repoSearch, tc.codeSearch).GoRepos(t.Context())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("GoRepos() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestGoRepos_FailsWhenBothSearchesFail(t *testing.T) {
-	// Neither half reporting anything is a failure, so the pass is retried rather
-	// than storing an empty list as if GitHub held no Go repos.
-	repoSearch := &windowedRepoSearch{t: t, failure: errors.New("no repo search today")}
-	codeSearch := &sizedCodeSearch{t: t, failureStatus: http.StatusTooManyRequests}
-
-	if _, err := scmWithSearches(t, repoSearch, codeSearch).GoRepos(t.Context()); err == nil {
-		t.Error("GoRepos() = nil error, want a failure when both searches failed")
-	}
-}
-
 func TestRepoTags_EmptyResponse(t *testing.T) {
-	sut := NewGithubSCM(&mockGithubClient{}, "", testGithubHostname, nil)
+	sut := NewGithubSCM(&mockGithubClient{}, "", nil)
 	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -493,7 +86,7 @@ func TestRepoTags_MultiplePages(t *testing.T) {
 		stubbedResponses = append(stubbedResponses, buildTagQueryResponses(t, response.tags, response.endCursor, response.hasNextPage))
 	}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "", testGithubHostname, nil)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "", nil)
 	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -519,7 +112,7 @@ func TestRepoTags_CommitAndTaggerDates(t *testing.T) {
 		{tag: "v1.1.0", taggerDate: tagged},
 	}, "", false)}
 
-	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbed}, "", testGithubHostname, nil)
+	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbed}, "", nil)
 	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
@@ -560,7 +153,7 @@ func TestHeadCommit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sut := NewGithubSCM(&mockGithubClient{stubbedResults: []any{tc.response}}, "", testGithubHostname, nil)
+			sut := NewGithubSCM(&mockGithubClient{stubbedResults: []any{tc.response}}, "", nil)
 
 			gotOID, gotCommitted, err := sut.HeadCommit(t.Context(), "someorg/repo1")
 			if err != nil {
@@ -581,7 +174,7 @@ func TestGoMod(t *testing.T) {
 	const goMod = "module go.example.com/thing\n"
 
 	server := createTestGoModServer(t, authToken, []tagResponse{{tag: "v1.0.0", goModContent: goMod}})
-	sut := NewGithubSCM(nil, server.URL, testGithubHostname, TokenClient(authToken))
+	sut := NewGithubSCM(nil, server.URL, TokenClient(authToken))
 
 	t.Run("found", func(t *testing.T) {
 		content, found, err := sut.GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
@@ -639,7 +232,7 @@ func TestModuleDirs(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	sut := NewGithubSCM(nil, server.URL, testGithubHostname, &http.Client{})
+	sut := NewGithubSCM(nil, server.URL, &http.Client{})
 	got, err := sut.ModuleDirs(t.Context(), "someorg/repo1", oid)
 	if err != nil {
 		t.Fatal(err)
@@ -658,7 +251,7 @@ func TestModuleDirs_NotFound(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	sut := NewGithubSCM(nil, server.URL, testGithubHostname, &http.Client{})
+	sut := NewGithubSCM(nil, server.URL, &http.Client{})
 	got, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
 	if err != nil {
 		t.Fatalf("ModuleDirs returned error for a 404, want none: %v", err)
@@ -666,93 +259,6 @@ func TestModuleDirs_NotFound(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("ModuleDirs = %v, want no dirs for a 404", got)
 	}
-}
-
-func buildRepoQueryResult(t *testing.T, reposURLs []string, endCursor githubv4.String, hasNextPage bool) repoQueryResult {
-	t.Helper()
-
-	var edges []repoQueryEdge
-
-	for _, repoURL := range reposURLs {
-		var edge repoQueryEdge
-		url, err := url.Parse(repoURL)
-		if err != nil {
-			t.Fatalf("error parsing repo url: %v", err)
-		}
-
-		edge.Node.Repo.URL = *githubv4.NewURI(githubv4.URI{URL: url})
-		edges = append(edges, edge)
-	}
-
-	var q repoQueryResult
-	q.Search.Edges = edges
-	q.Search.PageInfo.EndCursor = endCursor
-	q.Search.PageInfo.HasNextPage = hasNextPage
-	return q
-}
-
-// windowedRepoSearch answers repo searches the way GitHub's does: it honours the
-// created: window in the query, reports how many repos match it, and hands over at
-// most searchResultCap of them without saying it withheld any.
-type windowedRepoSearch struct {
-	t *testing.T
-	// createdAt maps a repo's "org/name" to when it was created.
-	createdAt map[string]time.Time
-	// windows records the created: window of every search issued, in order, as
-	// "<from>..<to>".
-	windows []string
-	// failure, when set, is returned from every search instead of results.
-	failure error
-}
-
-func (s *windowedRepoSearch) Query(_ context.Context, query any, variables map[string]any) error {
-	s.t.Helper()
-
-	if s.failure != nil {
-		return s.failure
-	}
-
-	searchQuery := string(variables["query"].(githubv4.String))
-	_, window, ok := strings.Cut(searchQuery, "created:")
-	if !ok {
-		s.t.Fatalf("search query %q has no created: window", searchQuery)
-	}
-	s.windows = append(s.windows, window)
-
-	from, to, ok := strings.Cut(window, "..")
-	if !ok {
-		s.t.Fatalf("created: window %q is not a range", window)
-	}
-	fromTime, err := time.Parse(time.RFC3339, from)
-	if err != nil {
-		s.t.Fatalf("parsing window start %q: %v", from, err)
-	}
-	toTime, err := time.Parse(time.RFC3339, to)
-	if err != nil {
-		s.t.Fatalf("parsing window end %q: %v", to, err)
-	}
-
-	var matching []string
-	for name, created := range s.createdAt {
-		if !created.Before(fromTime) && !created.After(toTime) {
-			matching = append(matching, name)
-		}
-	}
-	slices.Sort(matching)
-
-	result := query.(*repoQueryResult)
-	*result = buildRepoQueryResult(s.t, repoURLs(matching[:min(len(matching), searchResultCap)]), "", false)
-	result.Search.RepositoryCount = len(matching)
-	return nil
-}
-
-// repoURLs renders "org/name" repos as the URLs a search returns them at.
-func repoURLs(orgRepoNames []string) []string {
-	urls := make([]string, 0, len(orgRepoNames))
-	for _, name := range orgRepoNames {
-		urls = append(urls, "https://"+testGithubHostname+"/"+name)
-	}
-	return urls
 }
 
 type tagResponse struct {
@@ -835,4 +341,247 @@ func goModRequestPath(tag string) string {
 		return tag + "/" + tag[:i] + "/go.mod"
 	}
 	return tag + "/go.mod"
+}
+
+// hostRepos is a fake GitHub Enterprise host for a repo sweep: it answers the
+// accounts listing over HTTP and the owner-repositories query over GraphQL,
+// paging both the way GitHub does. Its owners are the owners of its repos.
+type hostRepos struct {
+	t *testing.T
+	// repos holds each owner's repos in listing order.
+	repos map[string][]hostRepo
+	// failFor stands in for a host that refuses part of a sweep.
+	failFor map[string]bool
+	queries int
+	// refuseAccounts stands in for a host too slow to answer the first tries.
+	refuseAccounts int
+}
+
+type hostRepo struct {
+	name      string
+	languages []string
+	rootGoMod bool
+}
+
+func (h *hostRepos) owners() []string { return slices.Sorted(maps.Keys(h.repos)) }
+
+// The cursor is an offset applied to every owner in the batch, since one query
+// carries one cursor.
+func (h *hostRepos) Query(_ context.Context, query any, variables map[string]any) error {
+	h.queries++
+
+	q := query.(*ownerReposQuery)
+	pageSize := int(variables["repoPageSize"].(githubv4.Int))
+	ownerIDs := variables["ownerIDs"].([]githubv4.ID)
+
+	from := 0
+	if cursor, _ := variables["reposCursor"].(*githubv4.String); cursor != nil {
+		offset, err := strconv.Atoi(string(*cursor))
+		if err != nil {
+			return fmt.Errorf("hostRepos: cursor %q: %v", *cursor, err)
+		}
+		from = offset
+	}
+
+	for _, id := range ownerIDs {
+		owner := id.(string)
+		if h.failFor[owner] {
+			return fmt.Errorf("hostRepos: no query today for %s", owner)
+		}
+	}
+
+	for _, id := range ownerIDs {
+		owner := id.(string)
+		repos := h.repos[owner]
+		to := min(from+pageSize, len(repos))
+
+		var node ownerNode
+		node.Owner.ID = githubv4.ID(owner)
+		for _, repo := range repos[from:to] {
+			var repoNode ownerRepoNode
+			repoNode.NameWithOwner = githubv4.String(repo.name)
+			for _, language := range repo.languages {
+				repoNode.Languages.Nodes = append(repoNode.Languages.Nodes, languageNode{githubv4.String(language)})
+			}
+			if repo.rootGoMod {
+				repoNode.RootGoMod = &struct {
+					OID githubv4.GitObjectID `graphql:"oid"`
+				}{OID: githubv4.GitObjectID(repo.name)}
+			}
+			node.Owner.Repositories.Nodes = append(node.Owner.Repositories.Nodes, repoNode)
+		}
+		node.Owner.Repositories.PageInfo = queryPageInfo{
+			EndCursor:   githubv4.String(strconv.Itoa(to)),
+			HasNextPage: to < len(repos),
+		}
+		q.Nodes = append(q.Nodes, node)
+	}
+	return nil
+}
+
+// handleAccounts honours since and per_page the way GitHub's listing does.
+func (h *hostRepos) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	if h.refuseAccounts > 0 {
+		h.refuseAccounts--
+		http.Error(w, "hostRepos: not this time", http.StatusInternalServerError)
+		return
+	}
+
+	since, _ := strconv.Atoi(r.URL.Query().Get("since"))
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+
+	accounts := []account{}
+	for i, login := range h.owners() {
+		if perPage > 0 && len(accounts) == perPage {
+			break
+		}
+		// Ids run from 1, so the listing ends with an empty page.
+		if id := i + 1; id > since {
+			accounts = append(accounts, account{ID: id, NodeID: login})
+		}
+	}
+	if err := json.NewEncoder(w).Encode(accounts); err != nil {
+		h.t.Errorf("hostRepos: encoding accounts: %v", err)
+	}
+}
+
+func scmForHost(t *testing.T, host *hostRepos) *GithubSCM {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(host.handleAccounts))
+	t.Cleanup(server.Close)
+	scm := NewGithubSCM(host, server.URL, server.Client())
+	scm.retryDelay = time.Microsecond
+	return scm
+}
+
+func goRepo(name string) hostRepo {
+	return hostRepo{name: name, languages: []string{"Go"}}
+}
+
+func TestGoRepos_KeepsOnlyReposListingGo(t *testing.T) {
+	// Go anywhere in a repo's languages makes it a Go repo, so the repo GitHub calls
+	// Java is one. So does a root go.mod on its own, which is all that marks a repo
+	// whose Go is generated at build time and so goes undetected.
+	got, err := scmForHost(t, &hostRepos{
+		t: t,
+		repos: map[string][]hostRepo{"someorg": {
+			{name: "someorg/go-primary", languages: []string{"Go", "Shell"}},
+			{name: "someorg/java-with-go", languages: []string{"Shell", "Java", "Go"}},
+			{name: "someorg/generated-go", languages: []string{"Shell"}, rootGoMod: true},
+			{name: "someorg/no-go", languages: []string{"Java", "Shell"}},
+			{name: "someorg/no-languages"},
+		}},
+	}).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"someorg/generated-go", "someorg/go-primary", "someorg/java-with-go"}
+	slices.Sort(got)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGoRepos_PagesAnOwnerWithMoreReposThanOnePage(t *testing.T) {
+	// An owner whose repos run past a page is read again from its cursor, so a big
+	// organization can't come back truncated.
+	var repos []hostRepo
+	var want []string
+	for i := range 2*ownerRepoPageSize + 1 {
+		name := fmt.Sprintf("bigorg/repo%03d", i)
+		repos = append(repos, goRepo(name))
+		want = append(want, name)
+	}
+	host := &hostRepos{t: t, repos: map[string][]hostRepo{"bigorg": repos}}
+
+	got, err := scmForHost(t, host).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+	}
+	// The batched page, then the two owner pages the rest needs.
+	if want := 3; host.queries != want {
+		t.Errorf("sweep made %d queries, want %d", host.queries, want)
+	}
+}
+
+func TestGoRepos_AccountsListingPagesByAccountID(t *testing.T) {
+	// More accounts than one listing page holds, so the sweep has to follow the
+	// since cursor to reach the last of them.
+	var want []string
+	repos := map[string][]hostRepo{}
+	for i := range accountsPageSize + 1 {
+		owner := fmt.Sprintf("org%03d", i)
+		repos[owner] = []hostRepo{goRepo(owner + "/thing")}
+		want = append(want, owner+"/thing")
+	}
+
+	got, err := scmForHost(t, &hostRepos{t: t, repos: repos}).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGoRepos_KeepsTheReposOfOwnersAQueryDidReach(t *testing.T) {
+	// One owner GitHub won't answer for must not cost every other owner's repos:
+	// storing the list never removes a repo, so the reachable ones still move the
+	// index forward and the rest wait for the next sweep.
+	var want []string
+	// Enough owners to fill more than one batch, so the failure lands in a batch of
+	// its own rather than taking the whole sweep with it.
+	fixture := map[string][]hostRepo{}
+	for i := range ownerBatchSize + 1 {
+		owner := fmt.Sprintf("org%03d", i)
+		fixture[owner] = []hostRepo{goRepo(owner + "/thing")}
+		want = append(want, owner+"/thing")
+	}
+	broken := slices.Sorted(maps.Keys(fixture))[ownerBatchSize]
+	want = slices.DeleteFunc(want, func(name string) bool { return name == broken+"/thing" })
+
+	got, err := scmForHost(t, &hostRepos{t: t, repos: fixture, failFor: map[string]bool{broken: true}}).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGoRepos_FailsWhenEveryQueryFails(t *testing.T) {
+	// An empty sweep would read as a host holding no Go at all, so a sweep that read
+	// nothing has to fail instead.
+	_, err := scmForHost(t, &hostRepos{
+		t:       t,
+		repos:   map[string][]hostRepo{"someorg": {goRepo("someorg/thing")}},
+		failFor: map[string]bool{"someorg": true},
+	}).GoRepos(t.Context())
+	if err == nil {
+		t.Error("GoRepos() = nil error, want a failure when every query failed")
+	}
+}
+
+func TestGoRepos_RetriesTheAccountsListing(t *testing.T) {
+	// The accounts listing pages by the last id seen, so a page lost to a slow host
+	// would take every account after it and quietly shorten the sweep.
+	got, err := scmForHost(t, &hostRepos{
+		t:              t,
+		repos:          map[string][]hostRepo{"someorg": {goRepo("someorg/thing")}},
+		refuseAccounts: sweepQueryAttempts - 1,
+	}).GoRepos(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"someorg/thing"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+	}
 }

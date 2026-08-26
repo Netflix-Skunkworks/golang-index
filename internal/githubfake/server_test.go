@@ -34,7 +34,7 @@ func sampleRepo() *githubfake.Repo {
 func newSCM(t *testing.T, repos ...*githubfake.Repo) *github.GithubSCM {
 	t.Helper()
 	srv := githubfake.NewServer(repos...)
-	return github.NewEnterpriseSCM(githubfake.BaseURL, githubfake.Host, srv.Client())
+	return github.NewEnterpriseSCM(githubfake.BaseURL, srv.Client())
 }
 
 func TestServerGoRepos(t *testing.T) {
@@ -44,8 +44,7 @@ func TestServerGoRepos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GoRepos: %v", err)
 	}
-	// GoRepos unions two searches, so the order it returns is an artifact of which
-	// found a repo first.
+	// A sweep returns repos in owner order, so sort before comparing.
 	want := []string{"someorg/other", "someorg/thing"}
 	if diff := cmp.Diff(want, slices.Sorted(slices.Values(got))); diff != "" {
 		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)

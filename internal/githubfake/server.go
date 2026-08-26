@@ -6,15 +6,14 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Host is the GitHub Enterprise hostname the fake presents. Pass it as the
-// githubHostName when constructing the GithubSCM under test (and as the repo-tags
-// indexer's DefaultModuleHost); GoRepos strips it from repo URLs.
+// Host is the GitHub Enterprise hostname the fake presents. Its repos are named
+// for it.
 const Host = "github.fake.test"
 
 // BaseURL is the base URL to give the GithubSCM under test. It is never dialed,
@@ -23,7 +22,7 @@ const Host = "github.fake.test"
 const BaseURL = "https://" + Host
 
 // Server is an in-memory fake GitHub Enterprise. Build a real *github.GithubSCM
-// with [BaseURL], [Host], and [Server.Client]; it serves the GraphQL, code search,
+// with [BaseURL] and [Server.Client]; it serves the GraphQL, accounts-listing,
 // raw-content, and git-trees surfaces the indexer uses, with no TCP socket.
 type Server struct {
 	handler http.Handler
@@ -44,7 +43,7 @@ func NewServer(repos ...*Repo) *Server {
 	mux.HandleFunc("POST /api/graphql", s.handleGraphQL)
 	mux.HandleFunc("GET /raw/{org}/{repo}/{tail...}", s.handleRaw)
 	mux.HandleFunc("GET /api/v3/repos/{org}/{repo}/git/trees/{ref...}", s.handleTrees)
-	mux.HandleFunc("GET /api/v3/search/code", s.handleCodeSearch)
+	mux.HandleFunc("GET /api/v3/users", s.handleAccounts)
 	s.handler = mux
 	return s
 }
@@ -80,8 +79,8 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.Contains(body.Query, "search(") {
-		s.respondRepoSearch(w)
+	if strings.Contains(body.Query, "nodes(ids:") {
+		s.respondOwnerRepos(w, body.Variables)
 		return
 	}
 
@@ -101,51 +100,64 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) respondRepoSearch(w http.ResponseWriter) {
-	var edges []any
-	for _, name := range slices.Sorted(maps.Keys(s.repos)) {
-		edges = append(edges, map[string]any{
-			"node": map[string]any{"url": "https://" + Host + "/" + name},
-		})
+// The fake takes an owner's login as its GraphQL node ID, since that is the only
+// thing naming an owner in a fixture.
+func (s *Server) owners() []string {
+	owners := map[string]bool{}
+	for name := range s.repos {
+		owner, _, _ := strings.Cut(name, "/")
+		owners[owner] = true
 	}
-	writeData(w, map[string]any{
-		"search": map[string]any{"edges": edges, "pageInfo": onePage()},
-	})
+	return slices.Sorted(maps.Keys(owners))
 }
 
-// goModSizeQuery is the code search the indexer issues, as a scan format.
-const goModSizeQuery = "filename:go.mod size:%d..%d"
+// handleAccounts pages by the id of the last account handed over, the way GitHub's
+// listing does. Owners are numbered from 1, so the listing ends with an empty page.
+func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	// An absent parameter reads as its zero value, which is what GitHub does with
+	// both of these.
+	since, _ := strconv.Atoi(r.URL.Query().Get("since"))
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
 
-// handleCodeSearch answers the go.mod search the indexer issues, matching a file
-// wherever it sits in a repo. The size: range is honoured; paging is not, so a
-// fixture's go.mod files must fit one page.
-func (s *Server) handleCodeSearch(w http.ResponseWriter, r *http.Request) {
-	if page := r.URL.Query().Get("page"); page != "" && page != "1" {
-		http.Error(w, "githubfake: code search paging is not modelled", http.StatusBadRequest)
-		return
-	}
-
-	var from, to int
-	if _, err := fmt.Sscanf(r.URL.Query().Get("q"), goModSizeQuery, &from, &to); err != nil {
-		http.Error(w, fmt.Sprintf("githubfake: code search query %q: %v", r.URL.Query().Get("q"), err), http.StatusBadRequest)
-		return
-	}
-
-	items := []any{}
-	for _, name := range slices.Sorted(maps.Keys(s.repos)) {
-		repo := s.repos[name]
-		for _, filePath := range slices.Sorted(maps.Keys(repo.Files)) {
-			size := len(repo.Files[filePath])
-			if path.Base(filePath) != "go.mod" || size < from || size > to {
-				continue
-			}
-			items = append(items, map[string]any{
-				"path":       filePath,
-				"repository": map[string]any{"full_name": name},
-			})
+	accounts := []any{}
+	for i, owner := range s.owners() {
+		if perPage > 0 && len(accounts) == perPage {
+			break
+		}
+		if id := i + 1; id > since {
+			accounts = append(accounts, map[string]any{"id": id, "node_id": owner})
 		}
 	}
-	writeJSON(w, map[string]any{"total_count": len(items), "items": items})
+	writeJSON(w, accounts)
+}
+
+// Every repo lists Go, since which repos a sweep picks out is not what the fixtures
+// exercise. Paging is not modelled, so an owner's repos must fit one page.
+func (s *Server) respondOwnerRepos(w http.ResponseWriter, vars map[string]json.RawMessage) {
+	var ownerIDs []string
+	if err := json.Unmarshal(vars["ownerIDs"], &ownerIDs); err != nil {
+		http.Error(w, fmt.Sprintf("githubfake: decoding ownerIDs variable: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	nodes := []any{}
+	for _, ownerID := range ownerIDs {
+		repos := []any{}
+		for _, name := range slices.Sorted(maps.Keys(s.repos)) {
+			if owner, _, _ := strings.Cut(name, "/"); owner != ownerID {
+				continue
+			}
+			repos = append(repos, map[string]any{
+				"nameWithOwner": name,
+				"languages":     map[string]any{"nodes": []any{map[string]any{"name": "Go"}}},
+			})
+		}
+		nodes = append(nodes, map[string]any{
+			"id":           ownerID,
+			"repositories": map[string]any{"nodes": repos, "pageInfo": onePage()},
+		})
+	}
+	writeData(w, map[string]any{"nodes": nodes})
 }
 
 func (s *Server) respondHead(w http.ResponseWriter, name string) {
