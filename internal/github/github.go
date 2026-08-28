@@ -18,7 +18,9 @@ import (
 
 const queryTimeout = 10 * time.Second
 
-const sweepQueryTimeout = 60 * time.Second
+// Listing an owner's repos, or a page of accounts, takes longer than the per-repo
+// queries do.
+const listingTimeout = 60 * time.Second
 
 // githubClient wraps query interface from the shurcooL/githubv4 package so
 // that we can mock github graphql query responses in tests.
@@ -34,7 +36,7 @@ type GithubSCM struct {
 	// Enterprise host, so it can differ from the host repos are named for.
 	baseURL    string
 	httpClient *http.Client
-	// retryDelay, when non-zero, replaces sweepRetryDelay so tests don't sleep.
+	// retryDelay, when non-zero, replaces accountsRetryDelay so tests don't sleep.
 	retryDelay time.Duration
 }
 
@@ -60,48 +62,29 @@ type queryPageInfo struct {
 	HasNextPage bool
 }
 
-// The most their APIs hand over at once.
-const (
-	ownerBatchSize   = 100
-	accountsPageSize = 100
-)
+// GitHub caps the accounts listing at 100 per page.
+const accountsPageSize = 100
 
 const (
-	batchedRepoPageSize = 20
-	ownerRepoPageSize   = 100
+	accountsAttempts   = 3
+	accountsRetryDelay = 5 * time.Second
 )
 
-// Every page of a sweep carries the cursor to the next, so a failed page costs the
-// pages after it as well.
-const (
-	sweepQueryAttempts = 3
-	sweepRetryDelay    = 5 * time.Second
-)
-
-// A query carries a single cursor for every owner in it, so an owner paged past its
-// first page is a batch of one.
-type ownerBatch struct {
-	ownerIDs     []githubv4.ID
-	cursor       *githubv4.String
-	repoPageSize int
-}
-
+// ownerReposQuery fetches (and then holds the response for) a page of one owner's
+// repositories. ownerAffiliations defaults to OWNER and COLLABORATOR, which would
+// have every member of an organization page through that organization's repos
+// again.
 type ownerReposQuery struct {
-	Nodes []ownerNode `graphql:"nodes(ids: $ownerIDs)"`
+	RepositoryOwner struct {
+		Repositories ownerRepoPage `graphql:"repositories(first: 100, isFork: false, ownerAffiliations: [OWNER], after: $reposCursor)"`
+	} `graphql:"repositoryOwner(login: $ownerLogin)"`
 }
 
-type ownerNode struct {
-	Owner struct {
-		Repositories struct {
-			Nodes    []ownerRepoNode
-			PageInfo queryPageInfo
-		} `graphql:"repositories(first: $repoPageSize, isFork: false, after: $reposCursor)"`
-		ID githubv4.ID
-	} `graphql:"... on RepositoryOwner"`
+type ownerRepoPage struct {
+	Nodes    []ownerRepoNode
+	PageInfo queryPageInfo
 }
 
-// Owners times repositories times languages has to stay inside the 500,000 nodes a
-// query may traverse.
 type ownerRepoNode struct {
 	NameWithOwner githubv4.String
 	Languages     struct {
@@ -118,141 +101,65 @@ type languageNode struct {
 
 const goLanguage = "Go"
 
-// GoRepos retrieves all Go repos. Returns results as slice of "orgname/reponame".
+// OwnerGoRepos returns the Go repos an owner owns, as a slice of
+// "orgname/reponame".
 //
 // A repo counts as a Go repo when GitHub detected Go among its languages, wherever
 // Go sits in that ranking, or when it has a go.mod at its root. Forks are skipped,
 // since a fork declares the module path its upstream already declares.
 //
-// Reads every repository owner on the host, so it blocks for minutes where there
-// are many repos.
-//
-// Owners a query can't read even on retry are left out and the sweep carries on:
-// storing a repo list never removes a repo, so the next sweep reaches them. Only
-// every query failing is an error.
-func (scm *GithubSCM) GoRepos(ctx context.Context) ([]string, error) {
-	ownerIDs, err := scm.ownerIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Owners paged past their first page join the end, so this grows as it is read.
-	unswept := make([]ownerBatch, 0, len(ownerIDs)/ownerBatchSize+1)
-	for batch := range slices.Chunk(ownerIDs, ownerBatchSize) {
-		unswept = append(unswept, ownerBatch{ownerIDs: batch, repoPageSize: batchedRepoPageSize})
-	}
-
-	var goRepos []string
-	var failed, ownersGivenUp int
-	for i := 0; i < len(unswept); i++ {
-		names, unfinished, err := scm.goReposPage(ctx, unswept[i])
+// An owner GitHub no longer knows comes back with no repos rather than an error.
+func (scm *GithubSCM) OwnerGoRepos(ctx context.Context, ownerLogin string) ([]string, error) {
+	var names []string
+	var cursor *githubv4.String
+	for {
+		page, err := scm.ownerReposPage(ctx, ownerLogin, cursor)
 		if err != nil {
-			// Giving up on a page gives up the pages after it too.
-			failed++
-			ownersGivenUp += len(unswept[i].ownerIDs)
-			slog.Error(err.Error())
-			continue
+			return nil, fmt.Errorf("error querying repositories of %s: %w", ownerLogin, err)
 		}
-		goRepos = append(goRepos, names...)
-		unswept = append(unswept, unfinished...)
-	}
-
-	if failed == len(unswept) {
-		return nil, fmt.Errorf("all %d Go repo sweep queries failed", failed)
-	}
-	slog.Info(fmt.Sprintf("Go repo sweep found %d repos listing Go across %d repository owners. %d of %d queries failed, leaving %d owners partly unread",
-		len(goRepos), len(ownerIDs), failed, len(unswept), ownersGivenUp))
-	return goRepos, nil
-}
-
-func (scm *GithubSCM) retrying(ctx context.Context, request func() error) error {
-	delay := scm.retryDelay
-	if delay == 0 {
-		delay = sweepRetryDelay
-	}
-
-	var err error
-	for attempt := range sweepQueryAttempts {
-		if attempt > 0 {
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		if err = request(); err == nil {
-			return nil
-		}
-		slog.Warn(fmt.Sprintf("Retrying Go repo sweep request (attempt %d of %d): %v", attempt+1, sweepQueryAttempts, err))
-	}
-	return err
-}
-
-// goReposPage returns the "org/name" of the batch's repos holding Go, and a batch
-// for each owner whose repositories carry on past this page.
-func (scm *GithubSCM) goReposPage(ctx context.Context, batch ownerBatch) ([]string, []ownerBatch, error) {
-	var names []string
-	var unfinished []ownerBatch
-	err := scm.retrying(ctx, func() error {
-		var err error
-		names, unfinished, err = scm.goReposPageOnce(ctx, batch)
-		return err
-	})
-	return names, unfinished, err
-}
-
-func (scm *GithubSCM) goReposPageOnce(ctx context.Context, batch ownerBatch) ([]string, []ownerBatch, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, sweepQueryTimeout)
-	defer cancel()
-
-	var q ownerReposQuery
-	variables := map[string]any{
-		"ownerIDs":     batch.ownerIDs,
-		"repoPageSize": githubv4.Int(batch.repoPageSize),
-		"reposCursor":  batch.cursor,
-	}
-	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-		return nil, nil, fmt.Errorf("error querying repositories of %d owners starting at %v: %w", len(batch.ownerIDs), batch.ownerIDs[0], err)
-	}
-
-	var names []string
-	var unfinished []ownerBatch
-	for _, node := range q.Nodes {
-		owner := node.Owner
-		for _, repo := range owner.Repositories.Nodes {
-			holdsGo := repo.RootGoMod != nil ||
-				slices.ContainsFunc(repo.Languages.Nodes, func(l languageNode) bool { return l.Name == goLanguage })
-			if holdsGo {
+		for _, repo := range page.Nodes {
+			if holdsGo(repo) {
 				names = append(names, string(repo.NameWithOwner))
 			}
 		}
-		if owner.Repositories.PageInfo.HasNextPage {
-			unfinished = append(unfinished, ownerBatch{
-				ownerIDs:     []githubv4.ID{owner.ID},
-				cursor:       githubv4.NewString(owner.Repositories.PageInfo.EndCursor),
-				repoPageSize: ownerRepoPageSize,
-			})
+		if !page.PageInfo.HasNextPage {
+			return names, nil
 		}
+		cursor = githubv4.NewString(page.PageInfo.EndCursor)
 	}
-	return names, unfinished, nil
 }
 
-// NodeID identifies the account to GraphQL; ID is what pages the listing.
+func (scm *GithubSCM) ownerReposPage(ctx context.Context, ownerLogin string, cursor *githubv4.String) (ownerRepoPage, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, listingTimeout)
+	defer cancel()
+
+	var q ownerReposQuery
+	variables := map[string]any{"ownerLogin": githubv4.String(ownerLogin), "reposCursor": cursor}
+	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
+		return ownerRepoPage{}, err
+	}
+	return q.RepositoryOwner.Repositories, nil
+}
+
+func holdsGo(repo ownerRepoNode) bool {
+	if repo.RootGoMod != nil {
+		return true
+	}
+	return slices.ContainsFunc(repo.Languages.Nodes, func(l languageNode) bool { return l.Name == goLanguage })
+}
+
+// Login names the account to GraphQL; ID is what pages the listing.
 type account struct {
-	ID     int    `json:"id"`
-	NodeID string `json:"node_id"`
+	ID    int    `json:"id"`
+	Login string `json:"login"`
+	Type  string `json:"type"`
 }
 
-// ownerIDs lists the node ID of every repository owner on the host. GitHub's
-// accounts listing holds organizations alongside users, so it alone covers every
-// owner; GraphQL offers no connection over them.
-//
-// TODO(jbarkhuysen): Give owners their own indexing stage and table, the way repos
-// have one. Enumerating them into memory on every pass ties the two together: they
-// can't be scheduled apart, a sweep that fails re-reads every account before it can
-// retry, and there is nowhere to record which owners a pass got through.
-func (scm *GithubSCM) ownerIDs(ctx context.Context) ([]githubv4.ID, error) {
-	var ids []githubv4.ID
+// Owners lists the login of every account on the host that can own repositories.
+// GitHub's REST accounts listing enumerates organizations alongside users in one
+// stream, so a single paged call covers every owner.
+func (scm *GithubSCM) Owners(ctx context.Context) ([]string, error) {
+	var logins []string
 	// The listing pages by the id of the last account handed over, and ends with an
 	// empty page.
 	sinceID := 0
@@ -262,27 +169,49 @@ func (scm *GithubSCM) ownerIDs(ctx context.Context) ([]githubv4.ID, error) {
 			return nil, err
 		}
 		if len(accounts) == 0 {
-			return ids, nil
+			slog.Info(fmt.Sprintf("Owner listing found %d repository owners", len(logins)))
+			return logins, nil
 		}
 		for _, a := range accounts {
-			ids = append(ids, githubv4.ID(a.NodeID))
+			// An allowlist, not a bot blocklist: repositoryOwner rejects any non-owner
+			// type, so admitting one would queue a work item that can never complete.
+			if a.Type == "User" || a.Type == "Organization" {
+				logins = append(logins, a.Login)
+			}
 		}
 		sinceID = accounts[len(accounts)-1].ID
 	}
 }
 
+// accountsSince reads one page of the accounts listing, retrying a few times: the
+// listing pages by the last id seen, so a page lost to a slow host would take every
+// account after it and quietly shorten the listing.
 func (scm *GithubSCM) accountsSince(ctx context.Context, sinceID int) ([]account, error) {
-	var accounts []account
-	err := scm.retrying(ctx, func() error {
-		var err error
-		accounts, err = scm.accountsPage(ctx, sinceID)
-		return err
-	})
-	return accounts, err
+	delay := scm.retryDelay
+	if delay == 0 {
+		delay = accountsRetryDelay
+	}
+
+	var err error
+	for attempt := range accountsAttempts {
+		if attempt > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		var accounts []account
+		if accounts, err = scm.accountsPage(ctx, sinceID); err == nil {
+			return accounts, nil
+		}
+		slog.Warn(fmt.Sprintf("Retrying accounts listing (attempt %d of %d): %v", attempt+1, accountsAttempts, err))
+	}
+	return nil, err
 }
 
 func (scm *GithubSCM) accountsPage(ctx context.Context, sinceID int) ([]account, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, sweepQueryTimeout)
+	queryCtx, cancel := context.WithTimeout(ctx, listingTimeout)
 	defer cancel()
 
 	request, err := http.NewRequestWithContext(

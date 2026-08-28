@@ -11,93 +11,136 @@ import (
 	"github.com/cenkalti/backoff/v5"
 )
 
-// allReposStore is the DB access the all-repos indexer needs; [*db.DB]
+// allOwnersStore is the DB access the all-owners indexer needs; [*db.DB]
 // satisfies it.
-type allReposStore interface {
-	NextReindexAllReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (shouldReindex bool, err error)
-	// StoreRepos also completes the work item, which is what holds the next pass off
-	// for ReindexPeriod rather than only ReindexTTL.
-	StoreRepos(ctx context.Context, orgRepoNames []string) error
+type allOwnersStore interface {
+	NextReindexAllOwnersWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (shouldReindex bool, err error)
+	// StoreOwners also completes the work item; that's what gates the next pass on
+	// ReindexPeriod rather than only ReindexTTL.
+	StoreOwners(ctx context.Context, ownerLogins []string) error
 }
 
-// repoLister lists all of the Go repos to index; [*github.GithubSCM] satisfies
-// it.
-type repoLister interface {
-	GoRepos(ctx context.Context) ([]string, error)
+// ownerLister lists all of the repository owners to index; [*github.GithubSCM]
+// satisfies it.
+type ownerLister interface {
+	Owners(ctx context.Context) ([]string, error)
 }
 
-// AllReposIndexer periodically re-indexes the full list of Go repos, feeding
-// new repos into the queue that [RepoTagsIndexer] drains.
-type AllReposIndexer struct {
-	DB     allReposStore
-	Lister repoLister
+// AllOwnersIndexer periodically re-indexes the full list of repository owners,
+// feeding new owners into the queue that [OwnerReposIndexer] drains.
+type AllOwnersIndexer struct {
+	DB     allOwnersStore
+	Lister ownerLister
 
-	// WorkCheckPeriod is how long to wait between checks of the work queue. There
-	// is only ever one all-repos work item, so there's no point checking eagerly.
+	// WorkCheckPeriod is the base wait between queue checks that find no work.
+	// There is only ever one all-owners work item, so most checks find nothing.
 	WorkCheckPeriod time.Duration
-	// ReindexTTL is how long a worker may hold the all-repos work item before it's
+	// ReindexTTL is how long a worker may hold the all-owners work item before it's
 	// considered abandoned and eligible for another worker.
 	ReindexTTL time.Duration
-	// ReindexPeriod is the minimum time between full re-indexes of the repo list.
+	// ReindexPeriod is the minimum time between full re-indexes of the owner list.
 	ReindexPeriod time.Duration
 
-	// bo, when non-nil, replaces the default GitHub retry backoff; tests set it to
-	// a fast backoff so retry paths don't sleep.
+	// bo, when non-nil, overrides the default GitHub retry backoff; a test seam.
 	bo *backoff.ExponentialBackOff
 }
 
-// Run re-indexes the repo list whenever the work queue says it's due, until ctx
-// is cancelled (returning ctx.Err()). A GitHub error is transient (back off and
-// retry); a DB error is fatal (return it, tearing down the process).
-func (ix *AllReposIndexer) Run(ctx context.Context) error {
-	bo := ix.bo
-	if bo == nil {
-		bo = newGithubBackoff()
-	}
-
-	for {
-		retryable, err := ix.IndexAllReposOnce(ctx)
-		if err != nil {
-			if !retryable {
-				return err
-			}
-			// TODO(jbarkhuysen): Add some metrics/alerting here.
-			slog.Error(err.Error())
-			if err := sleep(ctx, bo.NextBackOff()); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := sleep(ctx, ix.WorkCheckPeriod); err != nil {
-			return err
-		}
-	}
+// Run re-indexes the owner list whenever the work queue says it's due, until ctx
+// is cancelled (returning ctx.Err()).
+func (ix *AllOwnersIndexer) Run(ctx context.Context) error {
+	return runQueue(ctx, slog.Default(), ix.bo, ix.WorkCheckPeriod, ix.IndexAllOwnersOnce)
 }
 
-// IndexAllReposOnce performs a single all-repos pass: if the work queue says a
-// reindex is due, it refreshes the stored list of Go repos. [AllReposIndexer.Run]
-// calls it in a loop. A retryable error is a transient GitHub failure the caller
-// should back off on; a non-retryable error is fatal.
-func (ix *AllReposIndexer) IndexAllReposOnce(ctx context.Context) (retryable bool, err error) {
-	shouldReindex, err := ix.DB.NextReindexAllReposWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+// IndexAllOwnersOnce performs a single all-owners pass: if the work queue says a
+// reindex is due, it refreshes the stored list of repository owners. A retryable
+// error is a transient GitHub failure to back off on; a non-retryable one is fatal.
+func (ix *AllOwnersIndexer) IndexAllOwnersOnce(ctx context.Context) (gotWork, retryable bool, err error) {
+	shouldReindex, err := ix.DB.NextReindexAllOwnersWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
 	if err != nil {
-		return false, fmt.Errorf("error fetching next reindex all repos work: %v", err)
+		return false, false, fmt.Errorf("error fetching next reindex all owners work: %v", err)
 	}
 	if !shouldReindex {
-		slog.Info(fmt.Sprintf("Should re-index all Go repos: no, waiting %v to check again", ix.WorkCheckPeriod))
-		return false, nil
+		return false, false, nil
 	}
 
-	slog.Info("Should re-index all Go repos: yes")
-	allRepos, err := ix.Lister.GoRepos(ctx)
+	slog.Info("Should re-index all repository owners: yes")
+	owners, err := ix.Lister.Owners(ctx)
 	if err != nil {
-		return true, fmt.Errorf("error fetching all Go repos: %v", err)
+		return true, true, fmt.Errorf("error fetching all repository owners: %v", err)
 	}
-	if err := ix.DB.StoreRepos(ctx, allRepos); err != nil {
-		return false, fmt.Errorf("error storing all repos: %v", err)
+	if err := ix.DB.StoreOwners(ctx, owners); err != nil {
+		return true, false, fmt.Errorf("error storing all owners: %v", err)
 	}
-	slog.Info(fmt.Sprintf("Finished re-indexing all Go repos, saw %d repos", len(allRepos)))
-	return false, nil
+	slog.Info(fmt.Sprintf("Finished re-indexing all repository owners, saw %d owners", len(owners)))
+	return true, false, nil
+}
+
+// ownerReposStore is the DB access the owner-repos indexer needs; [*db.DB]
+// satisfies it.
+type ownerReposStore interface {
+	NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, workWasFound bool, err error)
+	// StoreOwnerRepos also completes the owner's work item, deferring its next
+	// re-index by ReindexPeriod. An empty repos slice is legal.
+	StoreOwnerRepos(ctx context.Context, ownerLogin string, orgRepoNames []string) error
+}
+
+// ownerRepoLister lists one owner's Go repos; [*github.GithubSCM] satisfies it.
+type ownerRepoLister interface {
+	OwnerGoRepos(ctx context.Context, ownerLogin string) ([]string, error)
+}
+
+// OwnerReposIndexer drains the owner work queue, re-indexing one owner's Go repos
+// at a time and feeding them into the queue that [RepoTagsIndexer] drains. Several
+// are run concurrently.
+type OwnerReposIndexer struct {
+	DB     ownerReposStore
+	Lister ownerRepoLister
+
+	// WorkerID identifies this worker in its log lines.
+	WorkerID int
+
+	// WorkCheckPeriod is the base wait between queue checks that find no work.
+	WorkCheckPeriod time.Duration
+	// ReindexTTL is how long a worker may hold an owner's work item before it's
+	// considered abandoned and eligible for another worker.
+	ReindexTTL time.Duration
+	// ReindexPeriod is the minimum time between re-indexes of a given owner.
+	ReindexPeriod time.Duration
+
+	// bo, when non-nil, overrides the default GitHub retry backoff; a test seam.
+	bo *backoff.ExponentialBackOff
+}
+
+// Run re-indexes owners' repos as the work queue hands them out, until ctx is
+// cancelled (returning ctx.Err()).
+func (ix *OwnerReposIndexer) Run(ctx context.Context) error {
+	return runQueue(ctx, slog.With("workerID", ix.WorkerID), ix.bo, ix.WorkCheckPeriod, ix.IndexNextOwnerOnce)
+}
+
+// IndexNextOwnerOnce re-indexes at most one queued owner's Go repos. A retryable
+// error is a transient GitHub failure to back off on; a non-retryable one is fatal.
+func (ix *OwnerReposIndexer) IndexNextOwnerOnce(ctx context.Context) (gotWork, retryable bool, err error) {
+	logger := slog.With("workerID", ix.WorkerID)
+
+	ownerToReindex, gotWork, err := ix.DB.NextReindexOwnerReposWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+	if err != nil {
+		return false, false, fmt.Errorf("error fetching next reindex owner repos work: %v", err)
+	}
+	if !gotWork {
+		return false, false, nil
+	}
+
+	logger.Info(fmt.Sprintf("Owner repos re-indexing: got work for owner %s", ownerToReindex))
+	orgRepoNames, err := ix.Lister.OwnerGoRepos(ctx, ownerToReindex)
+	if err != nil {
+		return true, true, fmt.Errorf("error fetching repos for %s: %v", ownerToReindex, err)
+	}
+	// An owner with no Go repos is stored too, which completes its work item.
+	if err := ix.DB.StoreOwnerRepos(ctx, ownerToReindex, orgRepoNames); err != nil {
+		return true, false, fmt.Errorf("error storing owner repos: %v", err)
+	}
+	logger.Info(fmt.Sprintf("Owner repos re-indexing: stored %d Go repos for owner %s", len(orgRepoNames), ownerToReindex))
+	return true, false, nil
 }
 
 // repoTagsStore is the DB access the repo-tags indexer needs; [*db.DB]
@@ -123,9 +166,7 @@ type RepoTagsIndexer struct {
 	// WorkerID identifies this worker in its log lines.
 	WorkerID int
 
-	// WorkCheckPeriod is how long to wait before re-checking the queue after
-	// finding no work; a 1-60s jitter is added. When work is found the next check
-	// is eager, with no wait.
+	// WorkCheckPeriod is the base wait between queue checks that find no work.
 	WorkCheckPeriod time.Duration
 	// ReindexTTL is how long a worker may hold a repo's work item before it's
 	// considered abandoned and eligible for another worker.
@@ -133,53 +174,19 @@ type RepoTagsIndexer struct {
 	// ReindexPeriod is the minimum time between re-indexes of a given repo.
 	ReindexPeriod time.Duration
 
-	// bo, when non-nil, replaces the default GitHub retry backoff; tests set it to
-	// a fast backoff so retry paths don't sleep.
+	// bo, when non-nil, overrides the default GitHub retry backoff; a test seam.
 	bo *backoff.ExponentialBackOff
 }
 
 // Run re-indexes repos' tags as the work queue hands them out, until ctx is
-// cancelled (returning ctx.Err()). A GitHub error is transient (back off and
-// retry); a DB error is fatal (return it, tearing down the process).
+// cancelled (returning ctx.Err()).
 func (ix *RepoTagsIndexer) Run(ctx context.Context) error {
-	logger := slog.With("workerID", ix.WorkerID)
-	bo := ix.bo
-	if bo == nil {
-		bo = newGithubBackoff()
-	}
-
-	for {
-		gotWork, retryable, err := ix.IndexNextRepoOnce(ctx)
-		if err != nil {
-			if !retryable {
-				return err
-			}
-			// TODO(jbarkhuysen): Add some metrics/alerting here.
-			logger.Error(err.Error())
-			if err := sleep(ctx, bo.NextBackOff()); err != nil {
-				return err
-			}
-			continue
-		}
-		if gotWork {
-			// Eagerly check for new work rather than waiting again.
-			continue
-		}
-
-		// Jitter the wait so the workers don't all poll in lockstep.
-		jitter := time.Duration(rand.Intn(60)+1) * time.Second
-		waitTime := ix.WorkCheckPeriod + jitter
-		logger.Info(fmt.Sprintf("Repo tags re-indexing: no work, waiting %v to check again", waitTime))
-		if err := sleep(ctx, waitTime); err != nil {
-			return err
-		}
-	}
+	return runQueue(ctx, slog.With("workerID", ix.WorkerID), ix.bo, ix.WorkCheckPeriod, ix.IndexNextRepoOnce)
 }
 
-// IndexNextRepoOnce re-indexes at most one queued repo's module versions.
-// gotWork reports whether a repo was claimed from the queue. [RepoTagsIndexer.Run]
-// calls it in a loop. A retryable error is a transient GitHub failure the caller
-// should back off on; a non-retryable error is fatal.
+// IndexNextRepoOnce re-indexes at most one queued repo's module versions. A
+// retryable error is a transient GitHub failure to back off on; a non-retryable
+// one is fatal.
 func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retryable bool, err error) {
 	logger := slog.With("workerID", ix.WorkerID)
 
@@ -223,6 +230,45 @@ func (ix *RepoTagsIndexer) repoModuleVersions(ctx context.Context, orgRepoName s
 		})
 	}
 	return repoModuleVersions, nil
+}
+
+// runQueue drives one stage: it calls once repeatedly until ctx is cancelled
+// (returning ctx.Err()). A retryable error is logged and backed off on; a
+// non-retryable one is returned. A check that found work is followed by an eager
+// one, and a check that didn't waits workCheckPeriod plus a 1-60s jitter, so the
+// workers don't all poll in lockstep.
+func runQueue(ctx context.Context, logger *slog.Logger, bo *backoff.ExponentialBackOff, workCheckPeriod time.Duration, once func(context.Context) (gotWork, retryable bool, err error)) error {
+	if bo == nil {
+		bo = newGithubBackoff()
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		gotWork, retryable, err := once(ctx)
+		if err != nil {
+			if !retryable {
+				return err
+			}
+			// TODO(jbarkhuysen): Add some metrics/alerting here.
+			logger.Error(err.Error())
+			if err := sleep(ctx, bo.NextBackOff()); err != nil {
+				return err
+			}
+			continue
+		}
+		if gotWork {
+			continue
+		}
+
+		waitTime := workCheckPeriod + time.Duration(rand.Intn(60)+1)*time.Second
+		logger.Info(fmt.Sprintf("No work, waiting %v to check again", waitTime))
+		if err := sleep(ctx, waitTime); err != nil {
+			return err
+		}
+	}
 }
 
 // newGithubBackoff returns a fresh retry backoff for GitHub errors, ranging from
