@@ -343,14 +343,19 @@ func goModRequestPath(tag string) string {
 	return tag + "/go.mod"
 }
 
-// hostRepos is a fake GitHub Enterprise host for a repo sweep: it answers the
-// accounts listing over HTTP and the owner-repositories query over GraphQL,
-// paging both the way GitHub does. Its owners are the owners of its repos.
+// hostRepos is a fake GitHub Enterprise host: it answers the accounts listing over
+// HTTP and the owner-repositories query over GraphQL. Its owners are the owners of
+// its repos.
 type hostRepos struct {
 	t *testing.T
 	// repos holds each owner's repos in listing order.
 	repos map[string][]hostRepo
-	// failFor stands in for a host that refuses part of a sweep.
+	// bots stand in for the bot accounts the listing carries alongside owners.
+	bots []string
+	// repoPageSize is the page size for an owner's repos; tests set it small to
+	// force paging, and scmForHost defaults it to production's 100 when unset.
+	repoPageSize int
+	// failFor stands in for a host that refuses to answer for an owner.
 	failFor map[string]bool
 	queries int
 	// refuseAccounts stands in for a host too slow to answer the first tries.
@@ -363,16 +368,14 @@ type hostRepo struct {
 	rootGoMod bool
 }
 
-func (h *hostRepos) owners() []string { return slices.Sorted(maps.Keys(h.repos)) }
-
-// The cursor is an offset applied to every owner in the batch, since one query
-// carries one cursor.
+// The cursor is an integer offset into the owner's repos, not an opaque token.
 func (h *hostRepos) Query(_ context.Context, query any, variables map[string]any) error {
 	h.queries++
 
-	q := query.(*ownerReposQuery)
-	pageSize := int(variables["repoPageSize"].(githubv4.Int))
-	ownerIDs := variables["ownerIDs"].([]githubv4.ID)
+	owner := string(variables["ownerLogin"].(githubv4.String))
+	if h.failFor[owner] {
+		return fmt.Errorf("hostRepos: no query today for %s", owner)
+	}
 
 	from := 0
 	if cursor, _ := variables["reposCursor"].(*githubv4.String); cursor != nil {
@@ -383,40 +386,40 @@ func (h *hostRepos) Query(_ context.Context, query any, variables map[string]any
 		from = offset
 	}
 
-	for _, id := range ownerIDs {
-		owner := id.(string)
-		if h.failFor[owner] {
-			return fmt.Errorf("hostRepos: no query today for %s", owner)
+	repos := h.repos[owner]
+	to := min(from+h.repoPageSize, len(repos))
+	page := &query.(*ownerReposQuery).RepositoryOwner.Repositories
+	for _, repo := range repos[from:to] {
+		var node ownerRepoNode
+		node.NameWithOwner = githubv4.String(repo.name)
+		for _, language := range repo.languages {
+			node.Languages.Nodes = append(node.Languages.Nodes, languageNode{githubv4.String(language)})
 		}
+		if repo.rootGoMod {
+			node.RootGoMod = &struct {
+				OID githubv4.GitObjectID `graphql:"oid"`
+			}{OID: githubv4.GitObjectID(repo.name)}
+		}
+		page.Nodes = append(page.Nodes, node)
 	}
-
-	for _, id := range ownerIDs {
-		owner := id.(string)
-		repos := h.repos[owner]
-		to := min(from+pageSize, len(repos))
-
-		var node ownerNode
-		node.Owner.ID = githubv4.ID(owner)
-		for _, repo := range repos[from:to] {
-			var repoNode ownerRepoNode
-			repoNode.NameWithOwner = githubv4.String(repo.name)
-			for _, language := range repo.languages {
-				repoNode.Languages.Nodes = append(repoNode.Languages.Nodes, languageNode{githubv4.String(language)})
-			}
-			if repo.rootGoMod {
-				repoNode.RootGoMod = &struct {
-					OID githubv4.GitObjectID `graphql:"oid"`
-				}{OID: githubv4.GitObjectID(repo.name)}
-			}
-			node.Owner.Repositories.Nodes = append(node.Owner.Repositories.Nodes, repoNode)
-		}
-		node.Owner.Repositories.PageInfo = queryPageInfo{
-			EndCursor:   githubv4.String(strconv.Itoa(to)),
-			HasNextPage: to < len(repos),
-		}
-		q.Nodes = append(q.Nodes, node)
-	}
+	page.PageInfo = queryPageInfo{EndCursor: githubv4.String(strconv.Itoa(to)), HasNextPage: to < len(repos)}
 	return nil
+}
+
+// accounts numbers entries from 1, so paging with since=lastID yields an empty
+// final page — the termination signal Owners relies on.
+func (h *hostRepos) accounts() []account {
+	var accounts []account
+	for _, login := range slices.Sorted(maps.Keys(h.repos)) {
+		accounts = append(accounts, account{Login: login, Type: "Organization"})
+	}
+	for _, login := range h.bots {
+		accounts = append(accounts, account{Login: login, Type: "Bot"})
+	}
+	for i := range accounts {
+		accounts[i].ID = i + 1
+	}
+	return accounts
 }
 
 // handleAccounts honours since and per_page the way GitHub's listing does.
@@ -430,17 +433,16 @@ func (h *hostRepos) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.Atoi(r.URL.Query().Get("since"))
 	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
 
-	accounts := []account{}
-	for i, login := range h.owners() {
-		if perPage > 0 && len(accounts) == perPage {
+	page := []account{}
+	for _, a := range h.accounts() {
+		if perPage > 0 && len(page) == perPage {
 			break
 		}
-		// Ids run from 1, so the listing ends with an empty page.
-		if id := i + 1; id > since {
-			accounts = append(accounts, account{ID: id, NodeID: login})
+		if a.ID > since {
+			page = append(page, a)
 		}
 	}
-	if err := json.NewEncoder(w).Encode(accounts); err != nil {
+	if err := json.NewEncoder(w).Encode(page); err != nil {
 		h.t.Errorf("hostRepos: encoding accounts: %v", err)
 	}
 }
@@ -448,6 +450,9 @@ func (h *hostRepos) handleAccounts(w http.ResponseWriter, r *http.Request) {
 func scmForHost(t *testing.T, host *hostRepos) *GithubSCM {
 	t.Helper()
 
+	if host.repoPageSize == 0 {
+		host.repoPageSize = 100
+	}
 	server := httptest.NewServer(http.HandlerFunc(host.handleAccounts))
 	t.Cleanup(server.Close)
 	scm := NewGithubSCM(host, server.URL, server.Client())
@@ -459,7 +464,7 @@ func goRepo(name string) hostRepo {
 	return hostRepo{name: name, languages: []string{"Go"}}
 }
 
-func TestGoRepos_KeepsOnlyReposListingGo(t *testing.T) {
+func TestOwnerGoRepos_KeepsOnlyReposListingGo(t *testing.T) {
 	// Go anywhere in a repo's languages makes it a Go repo, so the repo GitHub calls
 	// Java is one. So does a root go.mod on its own, which is all that marks a repo
 	// whose Go is generated at build time and so goes undetected.
@@ -472,116 +477,101 @@ func TestGoRepos_KeepsOnlyReposListingGo(t *testing.T) {
 			{name: "someorg/no-go", languages: []string{"Java", "Shell"}},
 			{name: "someorg/no-languages"},
 		}},
-	}).GoRepos(t.Context())
+	}).OwnerGoRepos(t.Context(), "someorg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"someorg/generated-go", "someorg/go-primary", "someorg/java-with-go"}
-	slices.Sort(got)
+	want := []string{"someorg/go-primary", "someorg/java-with-go", "someorg/generated-go"}
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+		t.Errorf("OwnerGoRepos() mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestGoRepos_PagesAnOwnerWithMoreReposThanOnePage(t *testing.T) {
+func TestOwnerGoRepos_PagesAnOwnerWithMoreReposThanOnePage(t *testing.T) {
 	// An owner whose repos run past a page is read again from its cursor, so a big
 	// organization can't come back truncated.
 	var repos []hostRepo
 	var want []string
-	for i := range 2*ownerRepoPageSize + 1 {
+	for i := range 5 {
 		name := fmt.Sprintf("bigorg/repo%03d", i)
 		repos = append(repos, goRepo(name))
 		want = append(want, name)
 	}
-	host := &hostRepos{t: t, repos: map[string][]hostRepo{"bigorg": repos}}
+	host := &hostRepos{t: t, repos: map[string][]hostRepo{"bigorg": repos}, repoPageSize: 2}
 
-	got, err := scmForHost(t, host).GoRepos(t.Context())
+	got, err := scmForHost(t, host).OwnerGoRepos(t.Context(), "bigorg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	slices.Sort(got)
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+		t.Errorf("OwnerGoRepos() mismatch (-want +got):\n%s", diff)
 	}
-	// The batched page, then the two owner pages the rest needs.
 	if want := 3; host.queries != want {
-		t.Errorf("sweep made %d queries, want %d", host.queries, want)
+		t.Errorf("listing made %d queries, want %d", host.queries, want)
 	}
 }
 
-func TestGoRepos_AccountsListingPagesByAccountID(t *testing.T) {
-	// More accounts than one listing page holds, so the sweep has to follow the
+func TestOwnerGoRepos_ReturnsTheHostsError(t *testing.T) {
+	// One owner the host won't answer for is that owner's problem: its work item
+	// goes uncompleted and the queue hands it out again.
+	_, err := scmForHost(t, &hostRepos{
+		t:       t,
+		repos:   map[string][]hostRepo{"someorg": {goRepo("someorg/thing")}},
+		failFor: map[string]bool{"someorg": true},
+	}).OwnerGoRepos(t.Context(), "someorg")
+	if err == nil {
+		t.Error("OwnerGoRepos() = nil error, want the host's failure")
+	}
+}
+
+func TestOwners_PagesByAccountID(t *testing.T) {
+	// More accounts than one listing page holds, so the listing has to follow the
 	// since cursor to reach the last of them.
 	var want []string
 	repos := map[string][]hostRepo{}
 	for i := range accountsPageSize + 1 {
 		owner := fmt.Sprintf("org%03d", i)
 		repos[owner] = []hostRepo{goRepo(owner + "/thing")}
-		want = append(want, owner+"/thing")
+		want = append(want, owner)
 	}
 
-	got, err := scmForHost(t, &hostRepos{t: t, repos: repos}).GoRepos(t.Context())
+	got, err := scmForHost(t, &hostRepos{t: t, repos: repos}).Owners(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	slices.Sort(got)
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Owners() mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestGoRepos_KeepsTheReposOfOwnersAQueryDidReach(t *testing.T) {
-	// One owner GitHub won't answer for must not cost every other owner's repos:
-	// storing the list never removes a repo, so the reachable ones still move the
-	// index forward and the rest wait for the next sweep.
-	var want []string
-	// Enough owners to fill more than one batch, so the failure lands in a batch of
-	// its own rather than taking the whole sweep with it.
-	fixture := map[string][]hostRepo{}
-	for i := range ownerBatchSize + 1 {
-		owner := fmt.Sprintf("org%03d", i)
-		fixture[owner] = []hostRepo{goRepo(owner + "/thing")}
-		want = append(want, owner+"/thing")
-	}
-	broken := slices.Sorted(maps.Keys(fixture))[ownerBatchSize]
-	want = slices.DeleteFunc(want, func(name string) bool { return name == broken+"/thing" })
-
-	got, err := scmForHost(t, &hostRepos{t: t, repos: fixture, failFor: map[string]bool{broken: true}}).GoRepos(t.Context())
+func TestOwners_SkipsAccountsThatCannotOwnRepos(t *testing.T) {
+	// Without the filter, a bot would be stored as an owner whose work item could
+	// never complete.
+	got, err := scmForHost(t, &hostRepos{
+		t:     t,
+		repos: map[string][]hostRepo{"someorg": {goRepo("someorg/thing")}},
+		bots:  []string{"dependabot[bot]"},
+	}).Owners(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	slices.Sort(got)
+	want := []string{"someorg"}
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Owners() mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestGoRepos_FailsWhenEveryQueryFails(t *testing.T) {
-	// An empty sweep would read as a host holding no Go at all, so a sweep that read
-	// nothing has to fail instead.
-	_, err := scmForHost(t, &hostRepos{
-		t:       t,
-		repos:   map[string][]hostRepo{"someorg": {goRepo("someorg/thing")}},
-		failFor: map[string]bool{"someorg": true},
-	}).GoRepos(t.Context())
-	if err == nil {
-		t.Error("GoRepos() = nil error, want a failure when every query failed")
-	}
-}
-
-func TestGoRepos_RetriesTheAccountsListing(t *testing.T) {
-	// The accounts listing pages by the last id seen, so a page lost to a slow host
-	// would take every account after it and quietly shorten the sweep.
+func TestOwners_RetriesTheAccountsListing(t *testing.T) {
 	got, err := scmForHost(t, &hostRepos{
 		t:              t,
 		repos:          map[string][]hostRepo{"someorg": {goRepo("someorg/thing")}},
-		refuseAccounts: sweepQueryAttempts - 1,
-	}).GoRepos(t.Context())
+		refuseAccounts: accountsAttempts - 1,
+	}).Owners(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"someorg/thing"}
+	want := []string{"someorg"}
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Owners() mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -9,27 +9,52 @@ import (
 	"github.com/Netflix-Skunkworks/golang-index/internal/github"
 )
 
-// fakeAllReposStore implements allReposStore.
-type fakeAllReposStore struct {
-	nextReindexAllReposWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (bool, error)
-	storeRepos              func(ctx context.Context, orgRepoNames []string) error
+type fakeAllOwnersStore struct {
+	nextReindexAllOwnersWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (bool, error)
+	storeOwners              func(ctx context.Context, ownerLogins []string) error
 }
 
-func (f *fakeAllReposStore) NextReindexAllReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (bool, error) {
-	return f.nextReindexAllReposWork(ctx, reindexTTL, reindexPeriod)
+func (f *fakeAllOwnersStore) NextReindexAllOwnersWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (bool, error) {
+	return f.nextReindexAllOwnersWork(ctx, reindexTTL, reindexPeriod)
 }
 
-func (f *fakeAllReposStore) StoreRepos(ctx context.Context, orgRepoNames []string) error {
-	return f.storeRepos(ctx, orgRepoNames)
+func (f *fakeAllOwnersStore) StoreOwners(ctx context.Context, ownerLogins []string) error {
+	return f.storeOwners(ctx, ownerLogins)
 }
 
-// fakeRepoLister implements repoLister.
-type fakeRepoLister struct {
-	goRepos func(ctx context.Context) ([]string, error)
+type fakeOwnerLister struct {
+	owners func(ctx context.Context) ([]string, error)
 }
 
-func (f *fakeRepoLister) GoRepos(ctx context.Context) ([]string, error) {
-	return f.goRepos(ctx)
+func (f *fakeOwnerLister) Owners(ctx context.Context) ([]string, error) {
+	return f.owners(ctx)
+}
+
+// ownerStoreCall is one StoreOwnerRepos call a fakeOwnerReposStore recorded.
+type ownerStoreCall struct {
+	OwnerLogin   string
+	OrgRepoNames []string
+}
+
+type fakeOwnerReposStore struct {
+	nextReindexOwnerReposWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, workWasFound bool, err error)
+	storeOwnerRepos           func(ctx context.Context, ownerLogin string, orgRepoNames []string) error
+}
+
+func (f *fakeOwnerReposStore) NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (string, bool, error) {
+	return f.nextReindexOwnerReposWork(ctx, reindexTTL, reindexPeriod)
+}
+
+func (f *fakeOwnerReposStore) StoreOwnerRepos(ctx context.Context, ownerLogin string, orgRepoNames []string) error {
+	return f.storeOwnerRepos(ctx, ownerLogin, orgRepoNames)
+}
+
+type fakeOwnerRepoLister struct {
+	ownerGoRepos func(ctx context.Context, ownerLogin string) ([]string, error)
+}
+
+func (f *fakeOwnerRepoLister) OwnerGoRepos(ctx context.Context, ownerLogin string) ([]string, error) {
+	return f.ownerGoRepos(ctx, ownerLogin)
 }
 
 // storeCall is one StoreRepoModuleVersions call a fakeRepoTagsStore recorded.
@@ -38,7 +63,6 @@ type storeCall struct {
 	RepoModuleVersions []*db.RepoModuleVersion
 }
 
-// fakeRepoTagsStore implements repoTagsStore.
 type fakeRepoTagsStore struct {
 	nextReindexRepoTagsWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, err error)
 	storeRepoModuleVersions func(ctx context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error

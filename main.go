@@ -26,9 +26,14 @@ var githubTLSClientCertFile = flag.String("githubTLSClientCertFile", "", "client
 var githubTLSClientKeyFile = flag.String("githubTLSClientKeyFile", "", "client key for mutual-TLS auth to the github host")
 var githubTLSCACertFile = flag.String("githubTLSCACertFile", "", "optional CA bundle to verify the github host's server certificate")
 
-var allReposReindexWorkCheckPeriod = flag.Duration("allReposReindexWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work")
-var allReposReindexPeriod = flag.Duration("allReposReindexPeriod", 24*time.Hour, "duration between re-indexing list of all repos")
-var allReposReindexTTL = flag.Duration("allReposReindexTTL", 2*time.Hour, "TTL that an indexing worker has for re-indexing list of all repos. Must exceed how long an all-repos pass takes, which is a sweep of every repo of every owner on the github host")
+var allOwnersReindexWorkCheckPeriod = flag.Duration("allOwnersReindexWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work")
+var allOwnersReindexPeriod = flag.Duration("allOwnersReindexPeriod", 24*time.Hour, "duration between re-indexing list of all repository owners")
+var allOwnersReindexTTL = flag.Duration("allOwnersReindexTTL", 30*time.Minute, "TTL that an indexing worker has for re-indexing list of all repository owners. Must exceed how long it takes to list every account on the github host")
+
+var ownerReposReindexingWorkCheckPeriod = flag.Duration("ownerReposReindexingWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work. only occurs when no work is found: if work was previously found, instant eager re-poll occurs. note that a 1-60s jitter is added to this duration")
+var ownerReposReindexingWorkers = flag.Int("ownerReposReindexingWorkers", 10, "number of workers that concurrently perform owner repo re-indexing")
+var ownerReposReindexPeriod = flag.Duration("ownerReposReindexPeriod", 24*time.Hour, "duration between re-indexing all Go repos for a particular owner")
+var ownerReposReindexTTL = flag.Duration("ownerReposReindexTTL", time.Hour, "TTL that an indexing worker has for re-indexing all Go repos for a particular owner. Must exceed how long it takes to page through the repos of the largest owner on the github host")
 
 var repoTagsReindexingWorkCheckPeriod = flag.Duration("repoTagsReindexingWorkCheckPeriod", 5*time.Minute, "duration describing the frequency to poll for work. only occurs when no work is found: if work was previously found, instant eager re-poll occurs. note that a 1-60s jitter is added to this duration")
 var repoTagsReindexingWorkers = flag.Int("repoTagsReindexingWorkers", 10, "number of workers that concurrently perform repo tag re-indexing")
@@ -74,14 +79,26 @@ func main() {
 
 	grp, grpCtx := errgroup.WithContext(ctx)
 
-	allReposIndexer := &indexer.AllReposIndexer{
+	allOwnersIndexer := &indexer.AllOwnersIndexer{
 		DB:              idb,
 		Lister:          githubSCM,
-		WorkCheckPeriod: *allReposReindexWorkCheckPeriod,
-		ReindexTTL:      *allReposReindexTTL,
-		ReindexPeriod:   *allReposReindexPeriod,
+		WorkCheckPeriod: *allOwnersReindexWorkCheckPeriod,
+		ReindexTTL:      *allOwnersReindexTTL,
+		ReindexPeriod:   *allOwnersReindexPeriod,
 	}
-	grp.Go(func() error { return allReposIndexer.Run(grpCtx) })
+	grp.Go(func() error { return allOwnersIndexer.Run(grpCtx) })
+
+	for workerID := range *ownerReposReindexingWorkers {
+		ownerReposIndexer := &indexer.OwnerReposIndexer{
+			DB:              idb,
+			Lister:          githubSCM,
+			WorkerID:        workerID,
+			WorkCheckPeriod: *ownerReposReindexingWorkCheckPeriod,
+			ReindexTTL:      *ownerReposReindexTTL,
+			ReindexPeriod:   *ownerReposReindexPeriod,
+		}
+		grp.Go(func() error { return ownerReposIndexer.Run(grpCtx) })
+	}
 
 	for workerID := range *repoTagsReindexingWorkers {
 		repoTagsIndexer := &indexer.RepoTagsIndexer{

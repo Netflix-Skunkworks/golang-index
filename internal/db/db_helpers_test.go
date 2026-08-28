@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,53 +19,60 @@ import (
 	_ "github.com/lib/pq"
 )
 
-func setupDB(t *testing.T) (*db.DB, *sql.DB) {
-	t.Helper()
+type handles struct {
+	sut   *db.DB
+	sqlDB *sql.DB
+}
 
-	username := os.Getenv("POSTGRES_USERNAME")
-	if username == "" {
-		t.Fatal("POSTGRES_USERNAME is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
+// The tests run one at a time and each calls resetTables, so one pair of pools
+// serves them all; a pair per test runs the server out of connections, since
+// neither handle is closed before the process exits.
+var openDB = sync.OnceValues(func() (handles, error) {
+	var missing []string
+	env := func(key string) string {
+		v := os.Getenv(key)
+		if v == "" {
+			missing = append(missing, key)
+		}
+		return v
 	}
-	password := os.Getenv("POSTGRES_PASSWORD")
-	if password == "" {
-		t.Fatal("POSTGRES_PASSWORD is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
-	}
-	host := os.Getenv("POSTGRES_HOST")
-	if host == "" {
-		t.Fatal("POSTGRES_HOST is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
-	}
-	portStr := os.Getenv("POSTGRES_PORT")
-	if portStr == "" {
-		t.Fatal("POSTGRES_PORT is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
+	username, password, host := env("POSTGRES_USERNAME"), env("POSTGRES_PASSWORD"), env("POSTGRES_HOST")
+	portStr, dbname := env("POSTGRES_PORT"), env("POSTGRES_DB")
+	if len(missing) > 0 {
+		return handles{}, fmt.Errorf("%s not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB", strings.Join(missing, ", "))
 	}
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
-		t.Fatalf("POSTGRES_PORT is invalid: %v", err)
-	}
-	dbname := os.Getenv("POSTGRES_DB")
-	if dbname == "" {
-		t.Fatal("POSTGRES_DB is not set. Must set POSTGRES_USERNAME, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT, and POSTGRES_DB.")
+		return handles{}, fmt.Errorf("POSTGRES_PORT is invalid: %v", err)
 	}
 
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", username, password, host, port, dbname)
 	sqlDB, err := sql.Open("postgres", connStr)
 	if err != nil {
-		t.Fatalf("setupDB: error opening db %s: %v", connStr, err)
+		return handles{}, fmt.Errorf("error opening db %s: %v", connStr, err)
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	if err := sqlDB.PingContext(ctx); err != nil {
-		t.Fatalf("setupDB: error pinging db %s: %v", connStr, err)
+		return handles{}, fmt.Errorf("error pinging db %s: %v", connStr, err)
 	}
 
-	sutDB, err := db.NewDB(username, password, host, uint16(port), dbname)
+	sut, err := db.NewDB(username, password, host, uint16(port), dbname)
 	if err != nil {
-		t.Fatalf("setupDB: error creating new DB: %v", err)
+		return handles{}, fmt.Errorf("error creating new DB: %v", err)
 	}
+	return handles{sut, sqlDB}, nil
+})
 
-	return sutDB, sqlDB
+func setupDB(t *testing.T) (*db.DB, *sql.DB) {
+	t.Helper()
+
+	h, err := openDB()
+	if err != nil {
+		t.Fatalf("setupDB: %v", err)
+	}
+	return h.sut, h.sqlDB
 }
 
 // Drops tables and re-runs migrations.
@@ -76,11 +85,17 @@ func resetTables(t *testing.T, db *sql.DB) {
 	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repos;"); err != nil {
 		t.Fatalf("resetTables: error dropping repos table: %v", err)
 	}
+	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS owners;"); err != nil {
+		t.Fatalf("resetTables: error dropping owners table: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS owner_indexing;"); err != nil {
+		t.Fatalf("resetTables: error dropping owner_indexing table: %v", err)
+	}
 	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS repo_indexing;"); err != nil {
 		t.Fatalf("resetTables: error dropping repo_indexing table: %v", err)
 	}
 	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS schema_migrations;"); err != nil {
-		t.Fatalf("resetTables: error dropping repo_indexing table: %v", err)
+		t.Fatalf("resetTables: error dropping schema_migrations table: %v", err)
 	}
 
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
@@ -167,17 +182,60 @@ SET created = EXCLUDED.created, indexed_at = EXCLUDED.indexed_at;`,
 	}
 }
 
-func setAllReposIndexing(t *testing.T, db *sql.DB, indexingBegan, indexingFinished time.Time) {
+func setAllOwnersIndexing(t *testing.T, db *sql.DB, indexingBegan, indexingFinished time.Time) {
 	t.Helper()
 
 	query := fmt.Sprintf(`
-UPDATE repo_indexing
+UPDATE owner_indexing
 SET indexing_began = TIMESTAMP WITH TIME ZONE '%s', indexing_finished = TIMESTAMP WITH TIME ZONE '%s'`,
 		indexingBegan.Format(time.RFC3339), indexingFinished.Format(time.RFC3339))
 
 	if _, err := db.ExecContext(t.Context(), query); err != nil {
-		t.Fatalf("setAllReposIndexing: error updating repo_indexing table:\nquery: %s\nerror: %v", query, err)
+		t.Fatalf("setAllOwnersIndexing: error updating owner_indexing table:\nquery: %s\nerror: %v", query, err)
 	}
+}
+
+// Upserts an owner row with the given indexing timestamps. Unlike
+// setSingleRepoIndexing, this inserts the row if it does not already exist.
+func setSingleOwnerIndexing(t *testing.T, db *sql.DB, ownerLogin string, indexingBegan, indexingFinished time.Time) {
+	t.Helper()
+
+	query := fmt.Sprintf(`
+INSERT INTO owners (owner_login, indexing_began, indexing_finished)
+VALUES ('%s', TIMESTAMP WITH TIME ZONE '%s', TIMESTAMP WITH TIME ZONE '%s')
+ON CONFLICT (owner_login) DO UPDATE
+SET indexing_began = EXCLUDED.indexing_began, indexing_finished = EXCLUDED.indexing_finished;`,
+		ownerLogin, indexingBegan.Format(time.RFC3339), indexingFinished.Format(time.RFC3339))
+
+	if _, err := db.ExecContext(t.Context(), query); err != nil {
+		t.Fatalf("setSingleOwnerIndexing: error updating owners table:\nquery: %s\nerror: %v", query, err)
+	}
+}
+
+func owners(t *testing.T, sdb *sql.DB) []string {
+	t.Helper()
+
+	query := `
+SELECT owner_login
+FROM owners
+ORDER BY owner_login`
+	rows, err := sdb.QueryContext(t.Context(), query)
+	if err != nil {
+		t.Fatalf("owners: error fetching owners:\nquery: %s\nerror: %v", query, err)
+	}
+	defer rows.Close()
+	var logins []string
+	for rows.Next() {
+		var login string
+		if err := rows.Scan(&login); err != nil {
+			t.Fatalf("owners: %v", err)
+		}
+		logins = append(logins, login)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("owners: %v", err)
+	}
+	return logins
 }
 
 func setSingleRepoIndexing(t *testing.T, db *sql.DB, orgRepoName string, indexingBegan, indexingFinished time.Time) {

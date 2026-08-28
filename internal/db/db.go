@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	// TODO(jbarkhuysen): Consider switching to pgx instead.
@@ -100,27 +99,60 @@ LIMIT $2;`
 	return repoModuleVersions, nil
 }
 
-// Retrieves from the work queue whether it's time to re-index all repos.
-func (d *DB) NextReindexAllReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (shouldReindex bool, _ error) {
+// Retrieves from the work queue whether it's time to re-index all owners.
+func (d *DB) NextReindexAllOwnersWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (shouldReindex bool, _ error) {
 	query := `
-UPDATE repo_indexing
+UPDATE owner_indexing
 SET indexing_began = NOW()
 WHERE indexing_began + ($1 * INTERVAL '1 SECOND') < NOW()
 AND indexing_finished + ($2 * INTERVAL '1 SECOND') < NOW();`
 	id, err := d.db.ExecContext(ctx, query, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seconds()))
 	if err != nil {
-		return false, fmt.Errorf("NextReindexAllReposWork:\nquery: %s\nerror: %v", query, err)
+		return false, fmt.Errorf("NextReindexAllOwnersWork:\nquery: %s\nerror: %v", query, err)
 	}
 	a, err := id.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("NextReindexAllReposWork: %v", err)
+		return false, fmt.Errorf("NextReindexAllOwnersWork: %v", err)
 	}
 	return a > 0, nil
+}
+
+func (d *DB) NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, workWasFound bool, _ error) {
+	// Without SKIP LOCKED, concurrent workers all claim the same owner: a worker
+	// that blocks on another's row lock goes on to re-check only the owner_login
+	// the subquery already picked, which still matches, so it claims it too.
+	query := fmt.Sprintf(`
+UPDATE owners
+SET indexing_began = NOW()
+WHERE owner_login = (
+    SELECT owner_login
+    FROM owners
+    WHERE indexing_began + (%d * INTERVAL '1 SECOND') < NOW()
+    AND indexing_finished + (%d * INTERVAL '1 SECOND') < NOW()
+    ORDER BY indexing_finished ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING owner_login;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seconds()))
+
+	row := d.db.QueryRowContext(ctx, query)
+	if row.Err() != nil {
+		return "", false, fmt.Errorf("NextReindexOwnerReposWork:\nquery: %s\nerror: %v", query, row.Err())
+	}
+	var o string
+	if err := row.Scan(&o); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("NextReindexOwnerReposWork: %v", err)
+	}
+	return o, true, nil
 }
 
 // Retrieves from the work queue the next repo for which to re-index tags.
 // workWasFound will be false if no work was found.
 func (d *DB) NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, _ error) {
+	// See NextReindexOwnerReposWork on SKIP LOCKED.
 	query := fmt.Sprintf(`
 UPDATE repos
 SET indexing_began = NOW()
@@ -131,6 +163,7 @@ WHERE org_repo_name = (
     AND indexing_finished + (%d * INTERVAL '1 SECOND') < NOW()
     ORDER BY indexing_finished ASC
     LIMIT 1
+    FOR UPDATE SKIP LOCKED
 )
 RETURNING org_repo_name;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seconds()))
 
@@ -148,50 +181,81 @@ RETURNING org_repo_name;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seco
 	return r, true, nil
 }
 
-// Store the given repos. Afterwards, they will be ready for repo tag indexing.
-// Completes the all-repos work item in the same transaction, which is what holds
-// the next pass off until the re-index period has passed.
+// Store the given owners, and complete the all-owners work item in the same
+// transaction, which holds the next pass off until the re-index period has passed.
 //
-// TODO(jbarkhuysen): The given orgRepoNames should be treated as authoratative.
-// Any repos in GitHub not in this list should be deleted (and their repo tags).
-func (d *DB) StoreRepos(ctx context.Context, orgRepoNames []string) error {
-	if len(orgRepoNames) == 0 {
-		return fmt.Errorf("StoreRepos called with 0 repos")
-	}
-
-	var valueStrings []string
-	var valueArgs []any
-	for i, orn := range orgRepoNames {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d)", i+1))
-		valueArgs = append(valueArgs, orn)
+// An empty ownerLogins is a listing that read nothing rather than a host with no
+// owners, so it's an error: storing it would hold the next pass off for the whole
+// re-index period.
+func (d *DB) StoreOwners(ctx context.Context, ownerLogins []string) error {
+	if len(ownerLogins) == 0 {
+		return fmt.Errorf("StoreOwners called with 0 owners")
 	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("StoreRepos: %v", err)
+		return fmt.Errorf("StoreOwners: %v", err)
 	}
-	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
 
-	query := fmt.Sprintf(`
-INSERT INTO repos (org_repo_name)
-VALUES %s
-ON CONFLICT (org_repo_name) DO NOTHING;`, strings.Join(valueStrings, ",\n\t"))
-	if _, err := tx.ExecContext(ctx, query, valueArgs...); err != nil {
-		return fmt.Errorf("StoreRepos:\nquery: %s\nerror: %v", query, err)
+	query := `
+INSERT INTO owners (owner_login)
+SELECT * FROM unnest($1::text[])
+ON CONFLICT (owner_login) DO NOTHING;`
+	if _, err := tx.ExecContext(ctx, query, pq.Array(ownerLogins)); err != nil {
+		return fmt.Errorf("StoreOwners:\nquery: %s\nerror: %v", query, err)
 	}
 
-	// repo_indexing holds a single row, so this needs no WHERE; see the table's
-	// definition in the initial migration.
+	// owner_indexing holds a single row, so this needs no WHERE.
 	query = `
-UPDATE repo_indexing
+UPDATE owner_indexing
 SET indexing_finished = NOW();`
 	if _, err := tx.ExecContext(ctx, query); err != nil {
-		return fmt.Errorf("StoreRepos:\nquery: %s\nerror: %v", query, err)
+		return fmt.Errorf("StoreOwners:\nquery: %s\nerror: %v", query, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("StoreRepos: %v", err)
+		return fmt.Errorf("StoreOwners: %v", err)
+	}
+
+	return nil
+}
+
+// Store the given owner's repos, and complete its work item in the same
+// transaction, which holds the owner's next pass off until the re-index period
+// has passed.
+//
+// An empty orgRepoNames is an owner holding no Go repos, not an error.
+//
+// TODO(jbarkhuysen): The given orgRepoNames should be treated as authoratative.
+// Any of the owner's repos in GitHub not in this list should be deleted (and their
+// repo tags).
+func (d *DB) StoreOwnerRepos(ctx context.Context, ownerLogin string, orgRepoNames []string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("StoreOwnerRepos: %v", err)
+	}
+	defer tx.Rollback()
+
+	// An empty array selects no rows, so an owner with no Go repos inserts nothing.
+	query := `
+INSERT INTO repos (org_repo_name)
+SELECT * FROM unnest($1::text[])
+ON CONFLICT (org_repo_name) DO NOTHING;`
+	if _, err := tx.ExecContext(ctx, query, pq.Array(orgRepoNames)); err != nil {
+		return fmt.Errorf("StoreOwnerRepos:\nquery: %s\nerror: %v", query, err)
+	}
+
+	query = `
+UPDATE owners
+SET indexing_finished = NOW()
+WHERE owner_login = $1;`
+	if _, err := tx.ExecContext(ctx, query, ownerLogin); err != nil {
+		return fmt.Errorf("StoreOwnerRepos:\nquery: %s\nerror: %v", query, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("StoreOwnerRepos: %v", err)
 	}
 
 	return nil
@@ -225,7 +289,6 @@ func (d *DB) StoreRepoModuleVersions(ctx context.Context, orgRepoName string, re
 	if err != nil {
 		return fmt.Errorf("StoreRepoModuleVersions: %v", err)
 	}
-	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
 
 	// Delete only STALE rows: those stored for this repo but absent from the

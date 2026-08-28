@@ -20,27 +20,27 @@ func smallBackoff() *backoff.ExponentialBackOff {
 	return b
 }
 
-func TestAllReposIndexer_StoresRepos(t *testing.T) {
+func TestAllOwnersIndexer_StoresOwners(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var stored [][]string
-	store := &fakeAllReposStore{
-		nextReindexAllReposWork: func(context.Context, time.Duration, time.Duration) (bool, error) {
+	store := &fakeAllOwnersStore{
+		nextReindexAllOwnersWork: func(context.Context, time.Duration, time.Duration) (bool, error) {
 			return true, nil
 		},
-		storeRepos: func(_ context.Context, orgRepoNames []string) error {
-			stored = append(stored, orgRepoNames)
+		storeOwners: func(_ context.Context, ownerLogins []string) error {
+			stored = append(stored, ownerLogins)
 			cancel()
 			return nil
 		},
 	}
-	lister := &fakeRepoLister{
-		goRepos: func(context.Context) ([]string, error) {
-			return []string{"org/a", "org/b"}, nil
+	lister := &fakeOwnerLister{
+		owners: func(context.Context) ([]string, error) {
+			return []string{"orga", "orgb"}, nil
 		},
 	}
-	ix := &AllReposIndexer{
+	ix := &AllOwnersIndexer{
 		DB:              store,
 		Lister:          lister,
 		bo:              smallBackoff(),
@@ -52,32 +52,32 @@ func TestAllReposIndexer_StoresRepos(t *testing.T) {
 	if err := ix.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run returned %v, want context.Canceled", err)
 	}
-	if diff := cmp.Diff([][]string{{"org/a", "org/b"}}, stored); diff != "" {
-		t.Errorf("stored repos mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff([][]string{{"orga", "orgb"}}, stored); diff != "" {
+		t.Errorf("stored owners mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestAllReposIndexer_NoWorkStoresNothing(t *testing.T) {
+func TestAllOwnersIndexer_NoWorkStoresNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	store := &fakeAllReposStore{
-		nextReindexAllReposWork: func(context.Context, time.Duration, time.Duration) (bool, error) {
+	store := &fakeAllOwnersStore{
+		nextReindexAllOwnersWork: func(context.Context, time.Duration, time.Duration) (bool, error) {
 			cancel()
 			return false, nil
 		},
-		storeRepos: func(context.Context, []string) error {
-			t.Errorf("StoreRepos called, want no call when there's no work")
+		storeOwners: func(context.Context, []string) error {
+			t.Errorf("StoreOwners called, want no call when there's no work")
 			return nil
 		},
 	}
-	lister := &fakeRepoLister{
-		goRepos: func(context.Context) ([]string, error) {
-			t.Errorf("GoRepos called, want no call when there's no work")
+	lister := &fakeOwnerLister{
+		owners: func(context.Context) ([]string, error) {
+			t.Errorf("Owners called, want no call when there's no work")
 			return nil, nil
 		},
 	}
-	ix := &AllReposIndexer{
+	ix := &AllOwnersIndexer{
 		DB:              store,
 		Lister:          lister,
 		bo:              smallBackoff(),
@@ -89,32 +89,32 @@ func TestAllReposIndexer_NoWorkStoresNothing(t *testing.T) {
 	}
 }
 
-func TestAllReposIndexer_RetriesAfterGitHubError(t *testing.T) {
+func TestAllOwnersIndexer_RetriesAfterGitHubError(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var stored [][]string
-	store := &fakeAllReposStore{
-		nextReindexAllReposWork: func(context.Context, time.Duration, time.Duration) (bool, error) {
+	store := &fakeAllOwnersStore{
+		nextReindexAllOwnersWork: func(context.Context, time.Duration, time.Duration) (bool, error) {
 			return true, nil
 		},
-		storeRepos: func(_ context.Context, orgRepoNames []string) error {
-			stored = append(stored, orgRepoNames)
+		storeOwners: func(_ context.Context, ownerLogins []string) error {
+			stored = append(stored, ownerLogins)
 			cancel()
 			return nil
 		},
 	}
-	goReposCalls := 0
-	lister := &fakeRepoLister{
-		goRepos: func(context.Context) ([]string, error) {
-			goReposCalls++
-			if goReposCalls == 1 {
+	ownersCalls := 0
+	lister := &fakeOwnerLister{
+		owners: func(context.Context) ([]string, error) {
+			ownersCalls++
+			if ownersCalls == 1 {
 				return nil, errors.New("github boom")
 			}
-			return []string{"org/a"}, nil
+			return []string{"orga"}, nil
 		},
 	}
-	ix := &AllReposIndexer{
+	ix := &AllOwnersIndexer{
 		DB:              store,
 		Lister:          lister,
 		bo:              smallBackoff(),
@@ -124,11 +124,135 @@ func TestAllReposIndexer_RetriesAfterGitHubError(t *testing.T) {
 	if err := ix.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run returned %v, want context.Canceled", err)
 	}
-	if goReposCalls != 2 {
-		t.Errorf("GoRepos called %d times, want 2 (one failure, one retry)", goReposCalls)
+	if ownersCalls != 2 {
+		t.Errorf("Owners called %d times, want 2 (one failure, one retry)", ownersCalls)
 	}
-	if diff := cmp.Diff([][]string{{"org/a"}}, stored); diff != "" {
-		t.Errorf("stored repos mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff([][]string{{"orga"}}, stored); diff != "" {
+		t.Errorf("stored owners mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func newOwnerReposIndexer(store *fakeOwnerReposStore, lister *fakeOwnerRepoLister) *OwnerReposIndexer {
+	return &OwnerReposIndexer{
+		DB:              store,
+		Lister:          lister,
+		bo:              smallBackoff(),
+		WorkCheckPeriod: time.Hour,
+		ReindexTTL:      time.Minute,
+		ReindexPeriod:   time.Minute,
+	}
+}
+
+// handOutOnce yields ownerLogin once, then cancels ctx so Run exits.
+func handOutOnce(ownerLogin string, cancel context.CancelFunc) func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+	handedOut := false
+	return func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+		if handedOut {
+			cancel()
+			return "", false, nil
+		}
+		handedOut = true
+		return ownerLogin, true, nil
+	}
+}
+
+func TestOwnerReposIndexer_StoresRepos(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var stored []ownerStoreCall
+	store := &fakeOwnerReposStore{
+		nextReindexOwnerReposWork: handOutOnce("someorg", cancel),
+		storeOwnerRepos: func(_ context.Context, ownerLogin string, orgRepoNames []string) error {
+			stored = append(stored, ownerStoreCall{ownerLogin, orgRepoNames})
+			return nil
+		},
+	}
+	lister := &fakeOwnerRepoLister{
+		ownerGoRepos: func(_ context.Context, ownerLogin string) ([]string, error) {
+			return []string{ownerLogin + "/a", ownerLogin + "/b"}, nil
+		},
+	}
+
+	if err := newOwnerReposIndexer(store, lister).Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+
+	want := []ownerStoreCall{{"someorg", []string{"someorg/a", "someorg/b"}}}
+	if diff := cmp.Diff(want, stored); diff != "" {
+		t.Errorf("stored owner repos mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOwnerReposIndexer_StoresWhenNoRepos(t *testing.T) {
+	// An owner with no Go repos is stored too: that completes its work item, so it
+	// waits out ReindexPeriod instead of being handed out again every ReindexTTL.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var stored []ownerStoreCall
+	store := &fakeOwnerReposStore{
+		nextReindexOwnerReposWork: handOutOnce("someorg", cancel),
+		storeOwnerRepos: func(_ context.Context, ownerLogin string, orgRepoNames []string) error {
+			stored = append(stored, ownerStoreCall{ownerLogin, orgRepoNames})
+			return nil
+		},
+	}
+	lister := &fakeOwnerRepoLister{
+		ownerGoRepos: func(context.Context, string) ([]string, error) { return nil, nil },
+	}
+
+	if err := newOwnerReposIndexer(store, lister).Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+
+	want := []ownerStoreCall{{"someorg", nil}}
+	if diff := cmp.Diff(want, stored); diff != "" {
+		t.Errorf("stored owner repos mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOwnerReposIndexer_RetriesAfterGitHubError(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var stored []ownerStoreCall
+	workCalls := 0
+	store := &fakeOwnerReposStore{
+		nextReindexOwnerReposWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+			workCalls++
+			if workCalls > 2 {
+				cancel()
+				return "", false, nil
+			}
+			return "someorg", true, nil
+		},
+		storeOwnerRepos: func(_ context.Context, ownerLogin string, orgRepoNames []string) error {
+			stored = append(stored, ownerStoreCall{ownerLogin, orgRepoNames})
+			return nil
+		},
+	}
+	goReposCalls := 0
+	lister := &fakeOwnerRepoLister{
+		ownerGoRepos: func(_ context.Context, ownerLogin string) ([]string, error) {
+			goReposCalls++
+			if goReposCalls == 1 {
+				return nil, errors.New("github boom")
+			}
+			return []string{ownerLogin + "/a"}, nil
+		},
+	}
+
+	if err := newOwnerReposIndexer(store, lister).Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+	if goReposCalls != 2 {
+		t.Errorf("OwnerGoRepos called %d times, want 2 (one failure, one retry)", goReposCalls)
+	}
+
+	want := []ownerStoreCall{{"someorg", []string{"someorg/a"}}}
+	if diff := cmp.Diff(want, stored); diff != "" {
+		t.Errorf("stored owner repos mismatch (-want +got):\n%s", diff)
 	}
 }
 

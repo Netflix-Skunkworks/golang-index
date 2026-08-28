@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -105,10 +106,11 @@ func TestIndexing(t *testing.T) {
 // harness wires the real db, GitHub SCM, and indexers against a real Postgres and
 // a fake GitHub serving repos.
 type harness struct {
-	db       *db.DB
-	sqlDB    *sql.DB
-	allRepos *indexer.AllReposIndexer
-	repoTags *indexer.RepoTagsIndexer
+	db         *db.DB
+	sqlDB      *sql.DB
+	allOwners  *indexer.AllOwnersIndexer
+	ownerRepos *indexer.OwnerReposIndexer
+	repoTags   *indexer.RepoTagsIndexer
 }
 
 func newHarness(t *testing.T, repos ...*githubfake.Repo) *harness {
@@ -122,7 +124,11 @@ func newHarness(t *testing.T, repos ...*githubfake.Repo) *harness {
 	return &harness{
 		db:    sutDB,
 		sqlDB: sqlDB,
-		allRepos: &indexer.AllReposIndexer{
+		allOwners: &indexer.AllOwnersIndexer{
+			DB: sutDB, Lister: scm,
+			WorkCheckPeriod: time.Minute, ReindexTTL: time.Minute, ReindexPeriod: time.Hour,
+		},
+		ownerRepos: &indexer.OwnerReposIndexer{
 			DB: sutDB, Lister: scm,
 			WorkCheckPeriod: time.Minute, ReindexTTL: time.Minute, ReindexPeriod: time.Hour,
 		},
@@ -260,28 +266,34 @@ func (h *harness) makeReindexDue(t *testing.T) {
 	t.Helper()
 
 	const rewind = "SET indexing_began = NOW() - INTERVAL '48 hours', indexing_finished = NOW() - INTERVAL '48 hours'"
-	for _, table := range []string{"repos", "repo_indexing"} {
+	for _, table := range []string{"owner_indexing", "owners", "repos"} {
 		if _, err := h.sqlDB.ExecContext(t.Context(), "UPDATE "+table+" "+rewind); err != nil {
 			t.Fatalf("makeReindexDue %s: %v", table, err)
 		}
 	}
 }
 
-// indexAll runs one full indexing cycle: refresh the repo list, then drain the
-// repo-tags work queue.
+// indexAll runs one full indexing cycle. The stages must run in this order: each
+// one fills the next stage's queue.
 func (h *harness) indexAll(t *testing.T) {
 	t.Helper()
 
-	if _, err := h.allRepos.IndexAllReposOnce(t.Context()); err != nil {
-		t.Fatalf("IndexAllReposOnce: %v", err)
-	}
+	drain(t, "IndexAllOwnersOnce", h.allOwners.IndexAllOwnersOnce)
+	drain(t, "IndexNextOwnerOnce", h.ownerRepos.IndexNextOwnerOnce)
+	drain(t, "IndexNextRepoOnce", h.repoTags.IndexNextRepoOnce)
+}
+
+// drain runs one stage's work items until its queue is empty.
+func drain(t *testing.T, name string, once func(context.Context) (gotWork, retryable bool, err error)) {
+	t.Helper()
+
 	for {
-		gotWork, _, err := h.repoTags.IndexNextRepoOnce(t.Context())
+		gotWork, _, err := once(t.Context())
 		if err != nil {
-			t.Fatalf("IndexNextRepoOnce: %v", err)
+			t.Fatalf("%s: %v", name, err)
 		}
 		if !gotWork {
-			break
+			return
 		}
 	}
 }
@@ -312,37 +324,39 @@ func (h *harness) stored(t *testing.T) []*db.RepoModuleVersion {
 	return stored
 }
 
-// incompleteWorkItems lists the repos the index cycle just run did not complete
-// the work item for, in name order. A repo lands here when indexing stored nothing
-// for it, leaving indexing_finished either at the -infinity the initial migration
-// defaults it to or at whatever makeReindexDue rewound it to — so the cutoff is any
-// time that is neither, and the re-index period can never hold its next pass off.
+// incompleteWorkItems lists the owners and repos the index cycle just run did not
+// complete the work item for, in name order. A completed pass sets
+// indexing_finished to now, while an incomplete one leaves it at either the
+// -infinity the migrations default it to or the 48-hour rewind makeReindexDue
+// applied; the 1-hour cutoff catches both without ever matching a completed pass.
 func (h *harness) incompleteWorkItems(t *testing.T) []string {
 	t.Helper()
 
-	const query = `
-SELECT org_repo_name
-FROM repos
+	var incomplete []string
+	for _, queue := range []struct{ table, key string }{{"owners", "owner_login"}, {"repos", "org_repo_name"}} {
+		query := fmt.Sprintf(`
+SELECT %[1]s
+FROM %[2]s
 WHERE indexing_finished < NOW() - INTERVAL '1 hour'
-ORDER BY org_repo_name`
-	rows, err := h.sqlDB.QueryContext(t.Context(), query)
-	if err != nil {
-		t.Fatalf("incompleteWorkItems:\nquery: %s\nerror: %v", query, err)
-	}
-	defer rows.Close()
-
-	var repos []string
-	for rows.Next() {
-		var orgRepoName string
-		if err := rows.Scan(&orgRepoName); err != nil {
-			t.Fatalf("incompleteWorkItems: scanning a row: %v", err)
+ORDER BY %[1]s`, queue.key, queue.table)
+		rows, err := h.sqlDB.QueryContext(t.Context(), query)
+		if err != nil {
+			t.Fatalf("incompleteWorkItems:\nquery: %s\nerror: %v", query, err)
 		}
-		repos = append(repos, orgRepoName)
+		defer rows.Close()
+
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatalf("incompleteWorkItems: scanning a row: %v", err)
+			}
+			incomplete = append(incomplete, queue.table+" "+name)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("incompleteWorkItems: iterating rows: %v", err)
+		}
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("incompleteWorkItems: iterating rows: %v", err)
-	}
-	return repos
+	return incomplete
 }
 
 // feed reads what the /index feed publishes from since onwards.

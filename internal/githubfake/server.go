@@ -79,7 +79,7 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.Contains(body.Query, "nodes(ids:") {
+	if strings.Contains(body.Query, "repositoryOwner(login:") {
 		s.respondOwnerRepos(w, body.Variables)
 		return
 	}
@@ -100,8 +100,7 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// The fake takes an owner's login as its GraphQL node ID, since that is the only
-// thing naming an owner in a fixture.
+// Owners are derived from repo keys because fixtures have no owner directive.
 func (s *Server) owners() []string {
 	owners := map[string]bool{}
 	for name := range s.repos {
@@ -125,7 +124,7 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if id := i + 1; id > since {
-			accounts = append(accounts, map[string]any{"id": id, "node_id": owner})
+			accounts = append(accounts, map[string]any{"id": id, "login": owner, "type": "Organization"})
 		}
 	}
 	writeJSON(w, accounts)
@@ -134,30 +133,25 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 // Every repo lists Go, since which repos a sweep picks out is not what the fixtures
 // exercise. Paging is not modelled, so an owner's repos must fit one page.
 func (s *Server) respondOwnerRepos(w http.ResponseWriter, vars map[string]json.RawMessage) {
-	var ownerIDs []string
-	if err := json.Unmarshal(vars["ownerIDs"], &ownerIDs); err != nil {
-		http.Error(w, fmt.Sprintf("githubfake: decoding ownerIDs variable: %v", err), http.StatusBadRequest)
+	var ownerLogin string
+	if err := json.Unmarshal(vars["ownerLogin"], &ownerLogin); err != nil {
+		http.Error(w, fmt.Sprintf("githubfake: decoding ownerLogin variable: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	nodes := []any{}
-	for _, ownerID := range ownerIDs {
-		repos := []any{}
-		for _, name := range slices.Sorted(maps.Keys(s.repos)) {
-			if owner, _, _ := strings.Cut(name, "/"); owner != ownerID {
-				continue
-			}
-			repos = append(repos, map[string]any{
-				"nameWithOwner": name,
-				"languages":     map[string]any{"nodes": []any{map[string]any{"name": "Go"}}},
-			})
+	repos := []any{}
+	for _, name := range slices.Sorted(maps.Keys(s.repos)) {
+		if owner, _, _ := strings.Cut(name, "/"); owner != ownerLogin {
+			continue
 		}
-		nodes = append(nodes, map[string]any{
-			"id":           ownerID,
-			"repositories": map[string]any{"nodes": repos, "pageInfo": onePage()},
+		repos = append(repos, map[string]any{
+			"nameWithOwner": name,
+			"languages":     map[string]any{"nodes": []any{map[string]any{"name": "Go"}}},
 		})
 	}
-	writeData(w, map[string]any{"nodes": nodes})
+	writeData(w, map[string]any{"repositoryOwner": map[string]any{
+		"repositories": map[string]any{"nodes": repos, "pageInfo": onePage()},
+	}})
 }
 
 func (s *Server) respondHead(w http.ResponseWriter, name string) {

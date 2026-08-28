@@ -37,17 +37,29 @@ func newSCM(t *testing.T, repos ...*githubfake.Repo) *github.GithubSCM {
 	return github.NewEnterpriseSCM(githubfake.BaseURL, srv.Client())
 }
 
-func TestServerGoRepos(t *testing.T) {
-	scm := newSCM(t, sampleRepo(), &githubfake.Repo{Name: "someorg/other"})
+func TestServerOwners(t *testing.T) {
+	scm := newSCM(t, sampleRepo(), &githubfake.Repo{Name: "otherorg/thing"})
 
-	got, err := scm.GoRepos(t.Context())
+	got, err := scm.Owners(t.Context())
 	if err != nil {
-		t.Fatalf("GoRepos: %v", err)
+		t.Fatalf("Owners: %v", err)
 	}
-	// A sweep returns repos in owner order, so sort before comparing.
-	want := []string{"someorg/other", "someorg/thing"}
+	want := []string{"otherorg", "someorg"}
 	if diff := cmp.Diff(want, slices.Sorted(slices.Values(got))); diff != "" {
-		t.Errorf("GoRepos() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Owners() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestServerOwnerGoRepos(t *testing.T) {
+	scm := newSCM(t, sampleRepo(), &githubfake.Repo{Name: "someorg/other"}, &githubfake.Repo{Name: "otherorg/thing"})
+
+	got, err := scm.OwnerGoRepos(t.Context(), "someorg")
+	if err != nil {
+		t.Fatalf("OwnerGoRepos: %v", err)
+	}
+	want := []string{"someorg/other", "someorg/thing"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("OwnerGoRepos() mismatch (-want +got):\n%s", diff)
 	}
 }
 
