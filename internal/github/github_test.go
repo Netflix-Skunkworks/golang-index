@@ -50,7 +50,7 @@ func (m *mockGithubClient) Query(ctx context.Context, query any, variables map[s
 
 func TestRepoTags_EmptyResponse(t *testing.T) {
 	sut := NewGithubSCM(&mockGithubClient{}, "", nil)
-	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
+	got, _, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestRepoTags_MultiplePages(t *testing.T) {
 	}
 
 	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbedResponses}, "", nil)
-	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
+	got, _, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestRepoTags_CommitAndTaggerDates(t *testing.T) {
 	}, "", false)}
 
 	sut := NewGithubSCM(&mockGithubClient{stubbedResults: stubbed}, "", nil)
-	got, err := sut.RepoTags(t.Context(), "someorg/repo1")
+	got, _, err := sut.RepoTags(t.Context(), "someorg/repo1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestHeadCommit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sut := NewGithubSCM(&mockGithubClient{stubbedResults: []any{tc.response}}, "", nil)
 
-			gotOID, gotCommitted, err := sut.HeadCommit(t.Context(), "someorg/repo1")
+			gotOID, gotCommitted, _, err := sut.HeadCommit(t.Context(), "someorg/repo1")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,7 +177,7 @@ func TestGoMod(t *testing.T) {
 	sut := NewGithubSCM(nil, server.URL, TokenClient(authToken))
 
 	t.Run("found", func(t *testing.T) {
-		content, found, err := sut.GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
+		content, found, _, err := sut.GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +190,7 @@ func TestGoMod(t *testing.T) {
 	})
 
 	t.Run("missing is not an error", func(t *testing.T) {
-		_, found, err := sut.GoMod(t.Context(), "someorg/repo1", "v9.9.9", "")
+		_, found, _, err := sut.GoMod(t.Context(), "someorg/repo1", "v9.9.9", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestModuleDirs(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	sut := NewGithubSCM(nil, server.URL, &http.Client{})
-	got, err := sut.ModuleDirs(t.Context(), "someorg/repo1", oid)
+	got, _, err := sut.ModuleDirs(t.Context(), "someorg/repo1", oid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,12 +252,54 @@ func TestModuleDirs_NotFound(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	sut := NewGithubSCM(nil, server.URL, &http.Client{})
-	got, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	got, _, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
 	if err != nil {
 		t.Fatalf("ModuleDirs returned error for a 404, want none: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("ModuleDirs = %v, want no dirs for a 404", got)
+	}
+}
+
+func forbiddenSCM(t *testing.T, headers map[string]string) *GithubSCM {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for name, value := range headers {
+			w.Header().Set(name, value)
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+	return NewGithubSCM(nil, server.URL, &http.Client{})
+}
+
+func TestModuleDirs_AccessDenied(t *testing.T) {
+	_, retryable, err := forbiddenSCM(t, nil).ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	if err == nil {
+		t.Fatal("ModuleDirs returned no error for a 403, want one")
+	}
+	if retryable {
+		t.Error("ModuleDirs reported a denied repo as retryable")
+	}
+}
+
+func TestModuleDirs_RateLimited(t *testing.T) {
+	sut := forbiddenSCM(t, map[string]string{"Gh-Limited-By": "search-elapsed-time", "Retry-After": "60"})
+	_, retryable, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	if err == nil {
+		t.Fatal("ModuleDirs returned no error for a 403, want one")
+	}
+	if !retryable {
+		t.Error("ModuleDirs reported a rate limit as not retryable")
+	}
+}
+
+func TestGoMod_AccessDenied(t *testing.T) {
+	_, _, retryable, err := forbiddenSCM(t, nil).GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
+	if err == nil {
+		t.Fatal("GoMod returned no error for a 403, want one")
+	}
+	if retryable {
+		t.Error("GoMod reported a denied repo as retryable")
 	}
 }
 

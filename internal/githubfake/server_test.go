@@ -66,7 +66,7 @@ func TestServerOwnerGoRepos(t *testing.T) {
 func TestServerRepoTags(t *testing.T) {
 	scm := newSCM(t, sampleRepo())
 
-	got, err := scm.RepoTags(t.Context(), "someorg/thing")
+	got, _, err := scm.RepoTags(t.Context(), "someorg/thing")
 	if err != nil {
 		t.Fatalf("RepoTags: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestServerRepoTags(t *testing.T) {
 func TestServerHeadCommit(t *testing.T) {
 	scm := newSCM(t, sampleRepo())
 
-	oid, committed, err := scm.HeadCommit(t.Context(), "someorg/thing")
+	oid, committed, _, err := scm.HeadCommit(t.Context(), "someorg/thing")
 	if err != nil {
 		t.Fatalf("HeadCommit: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestServerHeadCommit(t *testing.T) {
 func TestServerHeadCommit_NoCommits(t *testing.T) {
 	scm := newSCM(t, &githubfake.Repo{Name: "someorg/empty"})
 
-	oid, _, err := scm.HeadCommit(t.Context(), "someorg/empty")
+	oid, _, _, err := scm.HeadCommit(t.Context(), "someorg/empty")
 	if err != nil {
 		t.Fatalf("HeadCommit: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestServerGoMod(t *testing.T) {
 		{name: "missing", ref: "v1.0.0", subdir: "cmd", found: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			content, found, err := scm.GoMod(t.Context(), "someorg/thing", tc.ref, tc.subdir)
+			content, found, _, err := scm.GoMod(t.Context(), "someorg/thing", tc.ref, tc.subdir)
 			if err != nil {
 				t.Fatalf("GoMod: %v", err)
 			}
@@ -154,7 +154,7 @@ func TestServerRefOverrides(t *testing.T) {
 		{name: "at any other ref", ref: "tracing/v2.0.0", want: "module go.example.com/thing\n"},
 	} {
 		t.Run("root go.mod "+tc.name, func(t *testing.T) {
-			content, found, err := scm.GoMod(t.Context(), "someorg/thing", tc.ref, "")
+			content, found, _, err := scm.GoMod(t.Context(), "someorg/thing", tc.ref, "")
 			if err != nil {
 				t.Fatalf("GoMod: %v", err)
 			}
@@ -168,7 +168,7 @@ func TestServerRefOverrides(t *testing.T) {
 	}
 
 	t.Run("tree includes a file only that ref has", func(t *testing.T) {
-		got, err := scm.ModuleDirs(t.Context(), "someorg/thing", sampleHeadOID)
+		got, _, err := scm.ModuleDirs(t.Context(), "someorg/thing", sampleHeadOID)
 		if err != nil {
 			t.Fatalf("ModuleDirs: %v", err)
 		}
@@ -182,7 +182,7 @@ func TestServerRefOverrides(t *testing.T) {
 func TestServerModuleDirs(t *testing.T) {
 	scm := newSCM(t, sampleRepo())
 
-	got, err := scm.ModuleDirs(t.Context(), "someorg/thing", sampleHeadOID)
+	got, _, err := scm.ModuleDirs(t.Context(), "someorg/thing", sampleHeadOID)
 	if err != nil {
 		t.Fatalf("ModuleDirs: %v", err)
 	}

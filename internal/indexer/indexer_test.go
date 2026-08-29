@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Netflix-Skunkworks/golang-index/internal/db"
+	"github.com/Netflix-Skunkworks/golang-index/internal/github"
 	"github.com/cenkalti/backoff/v5"
 	"github.com/google/go-cmp/cmp"
 )
@@ -334,6 +335,52 @@ func TestRepoTagsIndexer_StoresWhenNoModuleVersions(t *testing.T) {
 	want := []storeCall{{"someorg/repo1", []*db.RepoModuleVersion{}}}
 	if diff := cmp.Diff(want, stored); diff != "" {
 		t.Errorf("stored repo tags mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRepoTagsIndexer_StoresWhenErrorIsNotRetryable(t *testing.T) {
+	tests := map[string]*fakeSCM{
+		"tree refused": {
+			headOID:       "abcdef0123456789abcdef0123456789abcdef01",
+			moduleDirsErr: errors.New("access denied"),
+		},
+		"go.mod refused": {
+			tags:     []github.Tag{{Name: "v1.0.0", Date: time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)}},
+			goModErr: errors.New("access denied"),
+		},
+	}
+
+	for name, scm := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			var stored []storeCall
+			handedOut := false
+			store := &fakeRepoTagsStore{
+				nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+					if handedOut {
+						cancel()
+						return "", false, nil
+					}
+					handedOut = true
+					return "someorg/repo1", true, nil
+				},
+				storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
+					stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
+					return nil
+				},
+			}
+
+			if err := newRepoTagsIndexer(store, scm).Run(ctx); !errors.Is(err, context.Canceled) {
+				t.Errorf("Run returned %v, want context.Canceled", err)
+			}
+
+			want := []storeCall{{"someorg/repo1", nil}}
+			if diff := cmp.Diff(want, stored); diff != "" {
+				t.Errorf("stored repo tags mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
