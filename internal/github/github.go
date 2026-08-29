@@ -22,6 +22,18 @@ const queryTimeout = 10 * time.Second
 // queries do.
 const listingTimeout = 60 * time.Second
 
+// repoAccessDenied distinguishes a denied repo from a rate limit, which GitHub
+// also reports as 403.
+func repoAccessDenied(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	rateLimited := resp.Header.Get("Gh-Limited-By") != "" ||
+		resp.Header.Get("Retry-After") != "" ||
+		resp.Header.Get("X-RateLimit-Remaining") == "0"
+	return !rateLimited
+}
+
 // githubClient wraps query interface from the shurcooL/githubv4 package so
 // that we can mock github graphql query responses in tests.
 type githubClient interface {
@@ -275,10 +287,10 @@ type Tag struct {
 }
 
 // RepoTags returns all of a repo's git tags, ordered newest first.
-func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) ([]Tag, error) {
+func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) (tags []Tag, retryable bool, err error) {
 	repo, err := newRepo(orgRepoName)
 	if err != nil {
-		return nil, fmt.Errorf("RepoTags: %v", err)
+		return nil, false, fmt.Errorf("RepoTags: %v", err)
 	}
 
 	variables := map[string]any{
@@ -287,7 +299,6 @@ func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) ([]Tag, 
 		"tagsCursor": (*githubv4.String)(nil),
 	}
 
-	var tags []Tag
 	var q tagQueryResponse
 	// Page through all the results.
 	for {
@@ -295,7 +306,7 @@ func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) ([]Tag, 
 		defer cancel()
 
 		if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-			return nil, fmt.Errorf("error querying tags for %s: %v", repo.fullName(), err)
+			return nil, true, fmt.Errorf("error querying tags for %s: %v", repo.fullName(), err)
 		}
 
 		for _, edge := range q.Repository.Refs.Edges {
@@ -321,7 +332,7 @@ func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) ([]Tag, 
 		variables["tagsCursor"] = githubv4.NewString(q.Repository.Refs.PageInfo.EndCursor)
 	}
 
-	return tags, nil
+	return tags, false, nil
 }
 
 // headQueryResponse fetches (and then holds the response for) the default
@@ -341,10 +352,10 @@ type headQueryResponse struct {
 
 // HeadCommit returns the default branch's HEAD commit oid and commit time. The
 // oid is empty when the repo has no commits.
-func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (string, time.Time, error) {
+func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (oid string, committed time.Time, retryable bool, err error) {
 	repo, err := newRepo(orgRepoName)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("HeadCommit: %v", err)
+		return "", time.Time{}, false, fmt.Errorf("HeadCommit: %v", err)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
@@ -356,21 +367,21 @@ func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (strin
 		"repoName": githubv4.String(repo.name),
 	}
 	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
-		return "", time.Time{}, fmt.Errorf("error querying HEAD for %s: %v", repo.fullName(), err)
+		return "", time.Time{}, true, fmt.Errorf("error querying HEAD for %s: %v", repo.fullName(), err)
 	}
 
 	commit := q.Repository.DefaultBranchRef.Target.Commit
-	return string(commit.OID), commit.CommittedDate.UTC(), nil
+	return string(commit.OID), commit.CommittedDate.UTC(), false, nil
 }
 
 // GoMod fetches the raw go.mod at subdir (the repo root when subdir is "") for
 // the given ref (a tag or commit). found is false, with a nil error, when the
 // repo has no such go.mod: that's a 404, which is common enough that we don't
 // treat it as an error or log it.
-func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string) ([]byte, bool, error) {
+func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string) (content []byte, found, retryable bool, err error) {
 	repo, err := newRepo(orgRepoName)
 	if err != nil {
-		return nil, false, fmt.Errorf("GoMod: %v", err)
+		return nil, false, false, fmt.Errorf("GoMod: %v", err)
 	}
 
 	goModPath := "go.mod"
@@ -385,29 +396,31 @@ func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string
 		nil,
 	)
 	if err != nil {
-		return nil, false, fmt.Errorf("error building raw github API request: %v", err)
+		return nil, false, false, fmt.Errorf("error building raw github API request: %v", err)
 	}
 
 	resp, err := scm.httpClient.Do(request)
 	if err != nil {
-		return nil, false, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
+		return nil, false, true, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 404 {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
-
+	if repoAccessDenied(resp) {
+		return nil, false, false, fmt.Errorf("access to %s denied by the raw github API", repo.fullName())
+	}
 	if resp.StatusCode != 200 {
-		return nil, false, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
+		return nil, false, true, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, false, fmt.Errorf("error reading raw github API response: %v", err)
+		return nil, false, true, fmt.Errorf("error reading raw github API response: %v", err)
 	}
 
-	return bodyBytes, true, nil
+	return bodyBytes, true, false, nil
 }
 
 // treeResponse is the subset of the git trees API response we read.
@@ -422,10 +435,10 @@ type treeResponse struct {
 // ModuleDirs returns the repo-relative directories that hold a go.mod at ref;
 // the repo root is the empty string. Non-module directories are skipped (see
 // moduleSubdir).
-func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) ([]string, error) {
+func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) (subdirs []string, retryable bool, err error) {
 	repo, err := newRepo(orgRepoName)
 	if err != nil {
-		return nil, fmt.Errorf("ModuleDirs: %v", err)
+		return nil, false, fmt.Errorf("ModuleDirs: %v", err)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
@@ -438,31 +451,33 @@ func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) (
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("error building git trees API request: %v", err)
+		return nil, false, fmt.Errorf("error building git trees API request: %v", err)
 	}
 
 	resp, err := scm.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("error querying git trees API: %v", err)
+		return nil, true, fmt.Errorf("error querying git trees API: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 404 {
-		return nil, nil
+		return nil, false, nil
+	}
+	if repoAccessDenied(resp) {
+		return nil, false, fmt.Errorf("access to %s denied by the git trees API", repo.fullName())
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("unexpected status code from git trees API. Status code: %d", resp.StatusCode)
+		return nil, true, fmt.Errorf("unexpected status code from git trees API. Status code: %d", resp.StatusCode)
 	}
 
 	var tree treeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tree); err != nil {
-		return nil, fmt.Errorf("error decoding git trees API response: %v", err)
+		return nil, true, fmt.Errorf("error decoding git trees API response: %v", err)
 	}
 	if tree.Truncated {
 		slog.Warn(fmt.Sprintf("git tree for %s is truncated; some modules may be missing", repo.fullName()))
 	}
 
-	var subdirs []string
 	for _, entry := range tree.Tree {
 		if entry.Type != "blob" {
 			continue
@@ -471,7 +486,7 @@ func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) (
 			subdirs = append(subdirs, subdir)
 		}
 	}
-	return subdirs, nil
+	return subdirs, false, nil
 }
 
 // moduleSubdir reports whether treePath is a repo module's go.mod and, if so,

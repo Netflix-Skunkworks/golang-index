@@ -84,10 +84,12 @@ type fakeSCM struct {
 	headAt  time.Time
 	// goMods maps a (ref, subdir) to that go.mod's contents. An absent key has no
 	// go.mod there.
-	goMods map[goModKey]string
+	goMods   map[goModKey]string
+	goModErr error
 	// moduleDirs is what ModuleDirs returns: the subdirs holding a go.mod at HEAD
 	// (the repo root is ""). Nil means the repo has no go.mod at all.
-	moduleDirs []string
+	moduleDirs    []string
+	moduleDirsErr error
 	// repoTagsFails makes the first repoTagsFails RepoTags calls return an error,
 	// to exercise transient-error handling. repoTagsCalls counts calls made.
 	repoTagsFails int
@@ -101,25 +103,31 @@ type goModKey struct {
 	subdir string
 }
 
-func (f *fakeSCM) RepoTags(context.Context, string) ([]github.Tag, error) {
+func (f *fakeSCM) RepoTags(context.Context, string) ([]github.Tag, bool, error) {
 	f.repoTagsCalls++
 	if f.repoTagsCalls <= f.repoTagsFails {
-		return nil, errors.New("github error")
+		return nil, true, errors.New("github error")
 	}
-	return f.tags, nil
+	return f.tags, false, nil
 }
 
-func (f *fakeSCM) HeadCommit(context.Context, string) (string, time.Time, error) {
-	return f.headOID, f.headAt, nil
+func (f *fakeSCM) HeadCommit(context.Context, string) (string, time.Time, bool, error) {
+	return f.headOID, f.headAt, false, nil
 }
 
-func (f *fakeSCM) GoMod(_ context.Context, _, ref, subdir string) ([]byte, bool, error) {
+func (f *fakeSCM) GoMod(_ context.Context, _, ref, subdir string) ([]byte, bool, bool, error) {
+	if f.goModErr != nil {
+		return nil, false, false, f.goModErr
+	}
 	if content, ok := f.goMods[goModKey{ref, subdir}]; ok {
-		return []byte(content), true, nil
+		return []byte(content), true, false, nil
 	}
-	return nil, false, nil
+	return nil, false, false, nil
 }
 
-func (f *fakeSCM) ModuleDirs(_ context.Context, _, _ string) ([]string, error) {
-	return f.moduleDirs, nil
+func (f *fakeSCM) ModuleDirs(_ context.Context, _, _ string) ([]string, bool, error) {
+	if f.moduleDirsErr != nil {
+		return nil, false, f.moduleDirsErr
+	}
+	return f.moduleDirs, false, nil
 }

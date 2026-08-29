@@ -40,7 +40,7 @@ func fakeFromTags(t *testing.T, specs []tagSpec) *fakeSCM {
 func versionsForRepo(t *testing.T, scm scm) []*mod.ModuleVersion {
 	t.Helper()
 
-	got, err := moduleVersionsForRepo(t.Context(), scm, testModuleHost, "someorg/repo1")
+	got, _, err := moduleVersionsForRepo(t.Context(), scm, testModuleHost, "someorg/repo1")
 	if err != nil {
 		t.Fatalf("moduleVersionsForRepo(%q) returned error: %v", "someorg/repo1", err)
 	}

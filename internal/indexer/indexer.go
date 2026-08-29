@@ -199,9 +199,15 @@ func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retr
 	}
 
 	logger.Info(fmt.Sprintf("Repo tags re-indexing: got work for repo %s", repoToReindex))
-	repoModuleVersions, err := ix.repoModuleVersions(ctx, repoToReindex)
-	if err != nil {
+	repoModuleVersions, retryable, err := ix.repoModuleVersions(ctx, repoToReindex)
+	switch {
+	case err != nil && retryable:
 		return true, true, fmt.Errorf("error fetching repo tags for %s: %v", repoToReindex, err)
+	case err != nil:
+		// A later pass would fail the same way, so the repo is indexed as holding
+		// nothing rather than handed back every ReindexTTL.
+		logger.Warn(fmt.Sprintf("Repo tags re-indexing: %v; indexing no module versions for it", err))
+		repoModuleVersions = nil
 	}
 	// A repo with no module versions is stored too, which completes its work item and
 	// drops any rows it used to have.
@@ -213,23 +219,23 @@ func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retr
 	return true, false, nil
 }
 
-// repoModuleVersions reads a repo's module versions and shapes them into the DB rows to
-// store. The error is a transient GitHub error for the caller to back off on.
-func (ix *RepoTagsIndexer) repoModuleVersions(ctx context.Context, orgRepoName string) ([]*db.RepoModuleVersion, error) {
-	moduleVersions, err := moduleVersionsForRepo(ctx, ix.SCM, ix.DefaultModuleHost, orgRepoName)
+// repoModuleVersions reads a repo's module versions and shapes them into the DB
+// rows to store.
+func (ix *RepoTagsIndexer) repoModuleVersions(ctx context.Context, orgRepoName string) (rows []*db.RepoModuleVersion, retryable bool, err error) {
+	moduleVersions, retryable, err := moduleVersionsForRepo(ctx, ix.SCM, ix.DefaultModuleHost, orgRepoName)
 	if err != nil {
-		return nil, err
+		return nil, retryable, err
 	}
 
-	repoModuleVersions := make([]*db.RepoModuleVersion, 0, len(moduleVersions))
+	rows = make([]*db.RepoModuleVersion, 0, len(moduleVersions))
 	for _, mv := range moduleVersions {
-		repoModuleVersions = append(repoModuleVersions, &db.RepoModuleVersion{
+		rows = append(rows, &db.RepoModuleVersion{
 			Version:    mv.Version,
 			ModulePath: mv.ModulePath,
 			Created:    mv.Created,
 		})
 	}
-	return repoModuleVersions, nil
+	return rows, false, nil
 }
 
 // runQueue drives one stage: it calls once repeatedly until ctx is cancelled
