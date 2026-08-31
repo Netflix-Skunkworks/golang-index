@@ -37,16 +37,21 @@ type ownerStoreCall struct {
 }
 
 type fakeOwnerReposStore struct {
-	nextReindexOwnerReposWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, workWasFound bool, err error)
+	nextReindexOwnerReposWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, failedAttempts int, workWasFound bool, err error)
 	storeOwnerRepos           func(ctx context.Context, ownerLogin string, orgRepoNames []string) error
+	completeOwnerReposWork    func(ctx context.Context, ownerLogin string) error
 }
 
-func (f *fakeOwnerReposStore) NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (string, bool, error) {
+func (f *fakeOwnerReposStore) NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (string, int, bool, error) {
 	return f.nextReindexOwnerReposWork(ctx, reindexTTL, reindexPeriod)
 }
 
 func (f *fakeOwnerReposStore) StoreOwnerRepos(ctx context.Context, ownerLogin string, orgRepoNames []string) error {
 	return f.storeOwnerRepos(ctx, ownerLogin, orgRepoNames)
+}
+
+func (f *fakeOwnerReposStore) CompleteOwnerReposWork(ctx context.Context, ownerLogin string) error {
+	return f.completeOwnerReposWork(ctx, ownerLogin)
 }
 
 type fakeOwnerRepoLister struct {
@@ -64,16 +69,21 @@ type storeCall struct {
 }
 
 type fakeRepoTagsStore struct {
-	nextReindexRepoTagsWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, err error)
+	nextReindexRepoTagsWork func(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, failedAttempts int, workWasFound bool, err error)
 	storeRepoModuleVersions func(ctx context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error
+	completeRepoTagsWork    func(ctx context.Context, orgRepoName string) error
 }
 
-func (f *fakeRepoTagsStore) NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (string, bool, error) {
+func (f *fakeRepoTagsStore) NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (string, int, bool, error) {
 	return f.nextReindexRepoTagsWork(ctx, reindexTTL, reindexPeriod)
 }
 
 func (f *fakeRepoTagsStore) StoreRepoModuleVersions(ctx context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
 	return f.storeRepoModuleVersions(ctx, orgRepoName, repoModuleVersions)
+}
+
+func (f *fakeRepoTagsStore) CompleteRepoTagsWork(ctx context.Context, orgRepoName string) error {
+	return f.completeRepoTagsWork(ctx, orgRepoName)
 }
 
 // fakeSCM is an in-memory scm: it serves canned tags, HEAD, module dirs, and

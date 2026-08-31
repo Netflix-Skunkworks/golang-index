@@ -159,7 +159,7 @@ func TestStoreOwnerRepos_NoRepos(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ownerToReindex, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 0, time.Hour)
+	ownerToReindex, _, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestStoreRepoModuleVersions_NoModuleVersions(t *testing.T) {
 		t.Errorf("StoreRepoModuleVersions: -want,+got: %s", diff)
 	}
 
-	repoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 0, time.Hour)
+	repoToReindex, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestNextReindexOwnerReposWork_SingleOwner(t *testing.T) {
 			resetTables(t, sqlDB)
 			setSingleOwnerIndexing(t, sqlDB, "foo", tc.lastIndexingBegan, tc.lastIndexingFinished)
 
-			gotOwnerToReindex, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), tc.reindexTTL, tc.reindexPeriod)
+			gotOwnerToReindex, _, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), tc.reindexTTL, tc.reindexPeriod)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -448,7 +448,7 @@ func TestNextReindexOwnerReposWork_NoOwners(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 
-	_, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 5*time.Minute, 24*time.Hour)
+	_, _, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 5*time.Minute, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +474,7 @@ func TestNextReindexOwnerReposWork_ConcurrentWorkersTakeDistinctOwners(t *testin
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			owner, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), time.Minute, time.Hour)
+			owner, _, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), time.Minute, time.Hour)
 			if err != nil {
 				t.Errorf("NextReindexOwnerReposWork: %v", err)
 				return
@@ -501,7 +501,7 @@ func TestNextReindexOwnerReposWork_TakeOldestNeedingReindexing(t *testing.T) {
 	setSingleOwnerIndexing(t, sqlDB, "bee", time.Now().Add(-70*time.Minute), time.Now().Add(-70*time.Minute))
 	setSingleOwnerIndexing(t, sqlDB, "gaz", time.Now().Add(-60*time.Minute), time.Now().Add(-60*time.Minute))
 
-	gotOwnerToReindex, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 10*time.Minute, 10*time.Minute)
+	gotOwnerToReindex, _, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 10*time.Minute, 10*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +522,7 @@ func TestNextReindexRepoTagsWork_SingleRepo(t *testing.T) {
 			populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().Add(-1000 * time.Hour)}})
 			setSingleRepoIndexing(t, sqlDB, "foo/bar", tc.lastIndexingBegan, tc.lastIndexingFinished)
 
-			gotRepoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), tc.reindexTTL, tc.reindexPeriod)
+			gotRepoToReindex, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), tc.reindexTTL, tc.reindexPeriod)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -546,7 +546,7 @@ func TestNextReindexRepoTagsWork_SingleRepo(t *testing.T) {
 func TestNextReindexRepoTagsWork_NoRepos(t *testing.T) {
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
-	_, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 5*time.Minute, 24*time.Hour)
+	_, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 5*time.Minute, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +565,7 @@ func TestNextReindexRepoTagsWork_QuickSuccession(t *testing.T) {
 	setSingleRepoIndexing(t, sqlDB, "foo/bar", time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
 
 	// Take work for the first time: should return true.
-	_, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 5*time.Minute, 24*time.Hour)
+	_, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 5*time.Minute, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func TestNextReindexRepoTagsWork_QuickSuccession(t *testing.T) {
 	}
 
 	// Try to take work the second time: should return false.
-	_, gotWork, err = sutDB.NextReindexRepoTagsWork(t.Context(), 5*time.Minute, 24*time.Hour)
+	_, _, gotWork, err = sutDB.NextReindexRepoTagsWork(t.Context(), 5*time.Minute, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +599,7 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeReindexNeeded(t *testing.T) {
 	// Needs re-indexing (based on reindex period specified a bit below).
 	setSingleRepoIndexing(t, sqlDB, "gaz/urk", time.Now().Add(-1*time.Hour), time.Now().Add(-1*time.Hour))
 
-	gotRepoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 10*time.Minute, 10*time.Minute)
+	gotRepoToReindex, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 10*time.Minute, 10*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +629,7 @@ func TestNextReindexRepoTagsWork_MultipleRepo_TakeOldestNeedingReindexing(t *tes
 	setSingleRepoIndexing(t, sqlDB, "bee/doh", time.Now().Add(-70*time.Minute), time.Now().Add(-70*time.Minute))
 	setSingleRepoIndexing(t, sqlDB, "gaz/urk", time.Now().Add(-60*time.Minute), time.Now().Add(-60*time.Minute))
 
-	gotRepoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 10*time.Minute, 10*time.Minute)
+	gotRepoToReindex, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 10*time.Minute, 10*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestNextReindexRepoTags_Roundtrip(t *testing.T) {
 	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", Created: time.Now().Add(-1000 * time.Hour)}})
 
 	// First, get some work.
-	gotRepoToReindex, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), time.Hour, time.Hour) // Re-index TTL & period are unused here.
+	gotRepoToReindex, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), time.Hour, time.Hour) // Re-index TTL & period are unused here.
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +666,7 @@ func TestNextReindexRepoTags_Roundtrip(t *testing.T) {
 
 	// We should not be able to get work, since we just finished (StoreRepoModuleVersions)
 	// work within the last 1h.
-	_, gotWork, err = sutDB.NextReindexRepoTagsWork(t.Context(), time.Hour, time.Hour)
+	_, _, gotWork, err = sutDB.NextReindexRepoTagsWork(t.Context(), time.Hour, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,11 +679,100 @@ func TestNextReindexRepoTags_Roundtrip(t *testing.T) {
 	// Note: We're only operating at the second granularity, so let's sleep 1s
 	// first.
 	time.Sleep(time.Second)
-	_, gotWork, err = sutDB.NextReindexRepoTagsWork(t.Context(), time.Second, time.Second)
+	_, _, gotWork, err = sutDB.NextReindexRepoTagsWork(t.Context(), time.Second, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !gotWork {
 		t.Fatalf("NextReindexRepoTagsWork: expected work but got none")
+	}
+}
+
+func TestNextReindexRepoTagsWork_CountsAttempts(t *testing.T) {
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().UTC()}})
+
+	// Every claim counts, so a repo whose indexing keeps failing is countable.
+	for want := 1; want <= 2; want++ {
+		_, failedAttempts, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !gotWork {
+			t.Fatalf("NextReindexRepoTagsWork: expected work but got none")
+		}
+		if failedAttempts != want {
+			t.Errorf("NextReindexRepoTagsWork: failedAttempts = %d, want %d", failedAttempts, want)
+		}
+	}
+
+	// Storing the repo's module versions completes the work item, which starts the
+	// count over.
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), "foo/bar", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, failedAttempts, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotWork {
+		t.Fatalf("NextReindexRepoTagsWork: expected work but got none")
+	}
+	if failedAttempts != 1 {
+		t.Errorf("NextReindexRepoTagsWork: failedAttempts = %d after a completed pass, want 1", failedAttempts)
+	}
+}
+
+func TestCompleteRepoTagsWork(t *testing.T) {
+	// A repo that couldn't be read hasn't been shown to hold nothing, so completing
+	// its work item leaves the module versions it already has.
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+
+	unread := &db.RepoModuleVersion{OrgRepoName: "foo/unread", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/unread", Created: time.Now().UTC()}
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{unread})
+
+	if err := sutDB.CompleteRepoTagsWork(t.Context(), "foo/unread"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string][]*db.RepoModuleVersion{"foo/unread": {unread}}
+	if diff := cmp.Diff(want, repoModuleVersions(t, sqlDB), cmpopts.EquateApproxTime(time.Second)); diff != "" {
+		t.Errorf("CompleteRepoTagsWork: -want,+got: %s", diff)
+	}
+
+	repoToReindex, _, gotWork, err := sutDB.NextReindexRepoTagsWork(t.Context(), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotWork {
+		t.Errorf("NextReindexRepoTagsWork handed out %q, want no work: foo/unread finished within the reindex period", repoToReindex)
+	}
+}
+
+func TestCompleteOwnerReposWork(t *testing.T) {
+	// An owner whose repos couldn't be listed hasn't been shown to have none, so
+	// completing its work item leaves the repos it already has.
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+	setSingleOwnerIndexing(t, sqlDB, "foo", time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().UTC()}})
+
+	if err := sutDB.CompleteOwnerReposWork(t.Context(), "foo"); err != nil {
+		t.Fatal(err)
+	}
+
+	gotRepos := slices.Sorted(maps.Keys(repoModuleVersions(t, sqlDB)))
+	if diff := cmp.Diff([]string{"foo/bar"}, gotRepos); diff != "" {
+		t.Errorf("CompleteOwnerReposWork: -want,+got: %s", diff)
+	}
+
+	ownerToReindex, _, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotWork {
+		t.Errorf("NextReindexOwnerReposWork handed out %q, want no work: foo finished within the reindex period", ownerToReindex)
 	}
 }

@@ -11,6 +11,14 @@ import (
 	"github.com/cenkalti/backoff/v5"
 )
 
+// maxFailedAttempts is how many attempts a work item gets before the queue gives
+// up on it and completes it anyway, leaving what is already stored for it alone.
+// The queues hand out the item with the oldest indexing_finished, so an item that
+// is never completed is the next one out every time its re-indexing TTL elapses,
+// for as long as it keeps failing. At the default TTLs, reaching this takes hours
+// of consecutive failures, so an outage that passes doesn't.
+const maxFailedAttempts = 10
+
 // allOwnersStore is the DB access the all-owners indexer needs; [*db.DB]
 // satisfies it.
 type allOwnersStore interface {
@@ -78,10 +86,13 @@ func (ix *AllOwnersIndexer) IndexAllOwnersOnce(ctx context.Context) (gotWork, re
 // ownerReposStore is the DB access the owner-repos indexer needs; [*db.DB]
 // satisfies it.
 type ownerReposStore interface {
-	NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, workWasFound bool, err error)
+	NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, failedAttempts int, workWasFound bool, err error)
 	// StoreOwnerRepos also completes the owner's work item, deferring its next
 	// re-index by ReindexPeriod. An empty repos slice is legal.
 	StoreOwnerRepos(ctx context.Context, ownerLogin string, orgRepoNames []string) error
+	// CompleteOwnerReposWork defers the owner's next re-index the same way, without
+	// storing any repos for it.
+	CompleteOwnerReposWork(ctx context.Context, ownerLogin string) error
 }
 
 // ownerRepoLister lists one owner's Go repos; [*github.GithubSCM] satisfies it.
@@ -122,7 +133,7 @@ func (ix *OwnerReposIndexer) Run(ctx context.Context) error {
 func (ix *OwnerReposIndexer) IndexNextOwnerOnce(ctx context.Context) (gotWork, retryable bool, err error) {
 	logger := slog.With("workerID", ix.WorkerID)
 
-	ownerToReindex, gotWork, err := ix.DB.NextReindexOwnerReposWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+	ownerToReindex, failedAttempts, gotWork, err := ix.DB.NextReindexOwnerReposWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
 	if err != nil {
 		return false, false, fmt.Errorf("error fetching next reindex owner repos work: %v", err)
 	}
@@ -133,6 +144,13 @@ func (ix *OwnerReposIndexer) IndexNextOwnerOnce(ctx context.Context) (gotWork, r
 	logger.Info(fmt.Sprintf("Owner repos re-indexing: got work for owner %s", ownerToReindex))
 	orgRepoNames, err := ix.Lister.OwnerGoRepos(ctx, ownerToReindex)
 	if err != nil {
+		if failedAttempts >= maxFailedAttempts {
+			logger.Error(fmt.Sprintf("Owner repos re-indexing: giving up on %s after %d attempts: %v", ownerToReindex, failedAttempts, err))
+			if err := ix.DB.CompleteOwnerReposWork(ctx, ownerToReindex); err != nil {
+				return true, false, fmt.Errorf("error completing owner repos work: %v", err)
+			}
+			return true, false, nil
+		}
 		return true, true, fmt.Errorf("error fetching repos for %s: %v", ownerToReindex, err)
 	}
 	// An owner with no Go repos is stored too, which completes its work item.
@@ -146,11 +164,14 @@ func (ix *OwnerReposIndexer) IndexNextOwnerOnce(ctx context.Context) (gotWork, r
 // repoTagsStore is the DB access the repo-tags indexer needs; [*db.DB]
 // satisfies it.
 type repoTagsStore interface {
-	NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, err error)
+	NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, failedAttempts int, workWasFound bool, err error)
 	// StoreRepoModuleVersions also completes the repo's work item, which is what
 	// holds its next re-index off for ReindexPeriod rather than only ReindexTTL. It
 	// takes no module versions when the repo has none.
 	StoreRepoModuleVersions(ctx context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error
+	// CompleteRepoTagsWork defers the repo's next re-index the same way, without
+	// storing any module versions for it.
+	CompleteRepoTagsWork(ctx context.Context, orgRepoName string) error
 }
 
 // RepoTagsIndexer drains the repo work queue, re-indexing one repo's module
@@ -190,7 +211,7 @@ func (ix *RepoTagsIndexer) Run(ctx context.Context) error {
 func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retryable bool, err error) {
 	logger := slog.With("workerID", ix.WorkerID)
 
-	repoToReindex, gotWork, err := ix.DB.NextReindexRepoTagsWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
+	repoToReindex, failedAttempts, gotWork, err := ix.DB.NextReindexRepoTagsWork(ctx, ix.ReindexTTL, ix.ReindexPeriod)
 	if err != nil {
 		return false, false, fmt.Errorf("error fetching next reindex repo tags work: %v", err)
 	}
@@ -202,6 +223,13 @@ func (ix *RepoTagsIndexer) IndexNextRepoOnce(ctx context.Context) (gotWork, retr
 	repoModuleVersions, retryable, err := ix.repoModuleVersions(ctx, repoToReindex)
 	switch {
 	case err != nil && retryable:
+		if failedAttempts >= maxFailedAttempts {
+			logger.Error(fmt.Sprintf("Repo tags re-indexing: giving up on %s after %d attempts: %v", repoToReindex, failedAttempts, err))
+			if err := ix.DB.CompleteRepoTagsWork(ctx, repoToReindex); err != nil {
+				return true, false, fmt.Errorf("error completing repo tags work: %v", err)
+			}
+			return true, false, nil
+		}
 		return true, true, fmt.Errorf("error fetching repo tags for %s: %v", repoToReindex, err)
 	case err != nil:
 		// A later pass would fail the same way, so the repo is indexed as holding

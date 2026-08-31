@@ -146,15 +146,15 @@ func newOwnerReposIndexer(store *fakeOwnerReposStore, lister *fakeOwnerRepoListe
 }
 
 // handOutOnce yields ownerLogin once, then cancels ctx so Run exits.
-func handOutOnce(ownerLogin string, cancel context.CancelFunc) func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+func handOutOnce(ownerLogin string, cancel context.CancelFunc) func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
 	handedOut := false
-	return func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+	return func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
 		if handedOut {
 			cancel()
-			return "", false, nil
+			return "", 0, false, nil
 		}
 		handedOut = true
-		return ownerLogin, true, nil
+		return ownerLogin, 1, true, nil
 	}
 }
 
@@ -221,13 +221,13 @@ func TestOwnerReposIndexer_RetriesAfterGitHubError(t *testing.T) {
 	var stored []ownerStoreCall
 	workCalls := 0
 	store := &fakeOwnerReposStore{
-		nextReindexOwnerReposWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+		nextReindexOwnerReposWork: func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
 			workCalls++
 			if workCalls > 2 {
 				cancel()
-				return "", false, nil
+				return "", 0, false, nil
 			}
-			return "someorg", true, nil
+			return "someorg", workCalls, true, nil
 		},
 		storeOwnerRepos: func(_ context.Context, ownerLogin string, orgRepoNames []string) error {
 			stored = append(stored, ownerStoreCall{ownerLogin, orgRepoNames})
@@ -278,13 +278,13 @@ func TestRepoTagsIndexer_StoresTags(t *testing.T) {
 	var stored []storeCall
 	handedOut := false
 	store := &fakeRepoTagsStore{
-		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
 			if handedOut {
 				cancel()
-				return "", false, nil
+				return "", 0, false, nil
 			}
 			handedOut = true
-			return "someorg/repo1", true, nil
+			return "someorg/repo1", 1, true, nil
 		},
 		storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
 			stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
@@ -315,13 +315,13 @@ func TestRepoTagsIndexer_StoresWhenNoModuleVersions(t *testing.T) {
 	var stored []storeCall
 	handedOut := false
 	store := &fakeRepoTagsStore{
-		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
 			if handedOut {
 				cancel()
-				return "", false, nil
+				return "", 0, false, nil
 			}
 			handedOut = true
-			return "someorg/repo1", true, nil
+			return "someorg/repo1", 1, true, nil
 		},
 		storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
 			stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
@@ -359,13 +359,13 @@ func TestRepoTagsIndexer_StoresWhenErrorIsNotRetryable(t *testing.T) {
 			var stored []storeCall
 			handedOut := false
 			store := &fakeRepoTagsStore{
-				nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+				nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
 					if handedOut {
 						cancel()
-						return "", false, nil
+						return "", 0, false, nil
 					}
 					handedOut = true
-					return "someorg/repo1", true, nil
+					return "someorg/repo1", 1, true, nil
 				},
 				storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
 					stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
@@ -393,13 +393,13 @@ func TestRepoTagsIndexer_RetriesAfterGitHubError(t *testing.T) {
 	var stored []storeCall
 	workCalls := 0
 	store := &fakeRepoTagsStore{
-		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, bool, error) {
+		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
 			workCalls++
 			if workCalls > 2 {
 				cancel()
-				return "", false, nil
+				return "", 0, false, nil
 			}
-			return "someorg/repo1", true, nil
+			return "someorg/repo1", workCalls, true, nil
 		},
 		storeRepoModuleVersions: func(_ context.Context, orgRepoName string, repoModuleVersions []*db.RepoModuleVersion) error {
 			stored = append(stored, storeCall{orgRepoName, repoModuleVersions})
@@ -450,5 +450,70 @@ func TestRunQueue_ResetsBackoffAfterSuccess(t *testing.T) {
 	}
 	if got := bo.NextBackOff(); got != bo.InitialInterval {
 		t.Errorf("backoff after a successful pass = %v, want the initial %v", got, bo.InitialInterval)
+	}
+}
+
+func TestRepoTagsIndexer_GivesUpOnARepoThatKeepsFailing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var completed []string
+	store := &fakeRepoTagsStore{
+		nextReindexRepoTagsWork: func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
+			if len(completed) > 0 {
+				cancel()
+				return "", 0, false, nil
+			}
+			return "someorg/repo1", maxFailedAttempts, true, nil
+		},
+		storeRepoModuleVersions: func(_ context.Context, orgRepoName string, _ []*db.RepoModuleVersion) error {
+			t.Errorf("StoreRepoModuleVersions called for %s, want the module versions it already has left alone", orgRepoName)
+			return nil
+		},
+		completeRepoTagsWork: func(_ context.Context, orgRepoName string) error {
+			completed = append(completed, orgRepoName)
+			return nil
+		},
+	}
+
+	if err := newRepoTagsIndexer(store, &fakeSCM{repoTagsFails: 1}).Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+	if diff := cmp.Diff([]string{"someorg/repo1"}, completed); diff != "" {
+		t.Errorf("completed work items mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOwnerReposIndexer_GivesUpOnAnOwnerThatKeepsFailing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var completed []string
+	store := &fakeOwnerReposStore{
+		nextReindexOwnerReposWork: func(context.Context, time.Duration, time.Duration) (string, int, bool, error) {
+			if len(completed) > 0 {
+				cancel()
+				return "", 0, false, nil
+			}
+			return "someorg", maxFailedAttempts, true, nil
+		},
+		storeOwnerRepos: func(_ context.Context, ownerLogin string, _ []string) error {
+			t.Errorf("StoreOwnerRepos called for %s, want the repos it already has left alone", ownerLogin)
+			return nil
+		},
+		completeOwnerReposWork: func(_ context.Context, ownerLogin string) error {
+			completed = append(completed, ownerLogin)
+			return nil
+		},
+	}
+	lister := &fakeOwnerRepoLister{
+		ownerGoRepos: func(context.Context, string) ([]string, error) { return nil, errors.New("github boom") },
+	}
+
+	if err := newOwnerReposIndexer(store, lister).Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+	if diff := cmp.Diff([]string{"someorg"}, completed); diff != "" {
+		t.Errorf("completed work items mismatch (-want +got):\n%s", diff)
 	}
 }

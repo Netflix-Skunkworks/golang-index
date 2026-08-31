@@ -37,6 +37,20 @@ func NewDB(username, password, host string, port uint16, dbname string) (*DB, er
 	return &DB{db: db}, nil
 }
 
+// Completing a work item holds the next pass off until the re-index period has
+// passed, and starts its attempt count over.
+const (
+	completeOwnerReposWorkQuery = `
+UPDATE owners
+SET indexing_finished = NOW(), failed_attempts = 0
+WHERE owner_login = $1;`
+
+	completeRepoTagsWorkQuery = `
+UPDATE repos
+SET indexing_finished = NOW(), failed_attempts = 0
+WHERE org_repo_name = $1;`
+)
+
 // RepoModuleVersion is one version of one module in a repo: a module path at a
 // version, where the version is a git tag or a synthesized pseudo-version.
 type RepoModuleVersion struct {
@@ -117,13 +131,15 @@ AND indexing_finished + ($2 * INTERVAL '1 SECOND') < NOW();`
 	return a > 0, nil
 }
 
-func (d *DB) NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, workWasFound bool, _ error) {
+// Retrieves from the work queue the next owner whose repos to re-index, and how
+// many attempts have begun since it last completed one, this attempt included.
+func (d *DB) NextReindexOwnerReposWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (ownerToReindex string, failedAttempts int, workWasFound bool, _ error) {
 	// Without SKIP LOCKED, concurrent workers all claim the same owner: a worker
 	// that blocks on another's row lock goes on to re-check only the owner_login
 	// the subquery already picked, which still matches, so it claims it too.
 	query := fmt.Sprintf(`
 UPDATE owners
-SET indexing_began = NOW()
+SET indexing_began = NOW(), failed_attempts = failed_attempts + 1
 WHERE owner_login = (
     SELECT owner_login
     FROM owners
@@ -133,29 +149,31 @@ WHERE owner_login = (
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING owner_login;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seconds()))
+RETURNING owner_login, failed_attempts;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seconds()))
 
 	row := d.db.QueryRowContext(ctx, query)
 	if row.Err() != nil {
-		return "", false, fmt.Errorf("NextReindexOwnerReposWork:\nquery: %s\nerror: %v", query, row.Err())
+		return "", 0, false, fmt.Errorf("NextReindexOwnerReposWork:\nquery: %s\nerror: %v", query, row.Err())
 	}
 	var o string
-	if err := row.Scan(&o); err != nil {
+	var attempts int
+	if err := row.Scan(&o, &attempts); err != nil {
 		if err == sql.ErrNoRows {
-			return "", false, nil
+			return "", 0, false, nil
 		}
-		return "", false, fmt.Errorf("NextReindexOwnerReposWork: %v", err)
+		return "", 0, false, fmt.Errorf("NextReindexOwnerReposWork: %v", err)
 	}
-	return o, true, nil
+	return o, attempts, true, nil
 }
 
-// Retrieves from the work queue the next repo for which to re-index tags.
+// Retrieves from the work queue the next repo for which to re-index tags, and how
+// many attempts have begun since it last completed one, this attempt included.
 // workWasFound will be false if no work was found.
-func (d *DB) NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, workWasFound bool, _ error) {
+func (d *DB) NextReindexRepoTagsWork(ctx context.Context, reindexTTL, reindexPeriod time.Duration) (repoToReindex string, failedAttempts int, workWasFound bool, _ error) {
 	// See NextReindexOwnerReposWork on SKIP LOCKED.
 	query := fmt.Sprintf(`
 UPDATE repos
-SET indexing_began = NOW()
+SET indexing_began = NOW(), failed_attempts = failed_attempts + 1
 WHERE org_repo_name = (
     SELECT org_repo_name
     FROM repos
@@ -165,20 +183,21 @@ WHERE org_repo_name = (
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING org_repo_name;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seconds()))
+RETURNING org_repo_name, failed_attempts;`, int64(reindexTTL.Seconds()), int64(reindexPeriod.Seconds()))
 
 	row := d.db.QueryRowContext(ctx, query)
 	if row.Err() != nil {
-		return "", false, fmt.Errorf("NextReindexRepoTagsWork:\nquery: %s\nerror: %v", query, row.Err())
+		return "", 0, false, fmt.Errorf("NextReindexRepoTagsWork:\nquery: %s\nerror: %v", query, row.Err())
 	}
 	var r string
-	if err := row.Scan(&r); err != nil {
+	var attempts int
+	if err := row.Scan(&r, &attempts); err != nil {
 		if err == sql.ErrNoRows {
-			return "", false, nil
+			return "", 0, false, nil
 		}
-		return "", false, fmt.Errorf("NextReindexRepoTagsWork: %v", err)
+		return "", 0, false, fmt.Errorf("NextReindexRepoTagsWork: %v", err)
 	}
-	return r, true, nil
+	return r, attempts, true, nil
 }
 
 // Store the given owners, and complete the all-owners work item in the same
@@ -246,18 +265,34 @@ ON CONFLICT (org_repo_name) DO NOTHING;`
 		return fmt.Errorf("StoreOwnerRepos:\nquery: %s\nerror: %v", query, err)
 	}
 
-	query = `
-UPDATE owners
-SET indexing_finished = NOW()
-WHERE owner_login = $1;`
-	if _, err := tx.ExecContext(ctx, query, ownerLogin); err != nil {
-		return fmt.Errorf("StoreOwnerRepos:\nquery: %s\nerror: %v", query, err)
+	if _, err := tx.ExecContext(ctx, completeOwnerReposWorkQuery, ownerLogin); err != nil {
+		return fmt.Errorf("StoreOwnerRepos:\nquery: %s\nerror: %v", completeOwnerReposWorkQuery, err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("StoreOwnerRepos: %v", err)
 	}
 
+	return nil
+}
+
+// Complete ownerLogin's work item without storing a listing for it. It is for an
+// owner whose repos could not be listed, which is not the same as an owner that
+// has none.
+func (d *DB) CompleteOwnerReposWork(ctx context.Context, ownerLogin string) error {
+	if _, err := d.db.ExecContext(ctx, completeOwnerReposWorkQuery, ownerLogin); err != nil {
+		return fmt.Errorf("CompleteOwnerReposWork:\nquery: %s\nerror: %v", completeOwnerReposWorkQuery, err)
+	}
+	return nil
+}
+
+// Complete orgRepoName's work item without storing module versions for it. It is
+// for a repo that could not be read, which is not the same as a repo that holds
+// nothing.
+func (d *DB) CompleteRepoTagsWork(ctx context.Context, orgRepoName string) error {
+	if _, err := d.db.ExecContext(ctx, completeRepoTagsWorkQuery, orgRepoName); err != nil {
+		return fmt.Errorf("CompleteRepoTagsWork:\nquery: %s\nerror: %v", completeRepoTagsWorkQuery, err)
+	}
 	return nil
 }
 
@@ -326,12 +361,8 @@ SET created = EXCLUDED.created;`
 		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
 	}
 
-	query = `
-UPDATE repos
-SET indexing_finished = NOW()
-WHERE org_repo_name = $1;`
-	if _, err := tx.ExecContext(ctx, query, orgRepoName); err != nil {
-		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", query, err)
+	if _, err := tx.ExecContext(ctx, completeRepoTagsWorkQuery, orgRepoName); err != nil {
+		return fmt.Errorf("StoreRepoModuleVersions:\nquery: %s\nerror: %v", completeRepoTagsWorkQuery, err)
 	}
 
 	if err := tx.Commit(); err != nil {
