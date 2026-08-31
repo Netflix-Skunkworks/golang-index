@@ -21,6 +21,10 @@ const Host = "github.fake.test"
 // to the fake's handlers and its host is [Host].
 const BaseURL = "https://" + Host
 
+// movedLocation is the malformed Location a renamed repo's git tree comes back
+// with: the HTTP reason phrase rather than a URL.
+const movedLocation = "Moved Permanently"
+
 // Server is an in-memory fake GitHub Enterprise. Build a real *github.GithubSCM
 // with [BaseURL] and [Server.Client]; it serves the GraphQL, accounts-listing,
 // raw-content, and git-trees surfaces the indexer uses, with no TCP socket.
@@ -60,7 +64,11 @@ type roundTripper struct{ handler http.Handler }
 func (rt roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	rec := httptest.NewRecorder()
 	rt.handler.ServeHTTP(rec, req)
-	return rec.Result(), nil
+	resp := rec.Result()
+	// The client resolves a redirect's Location against resp.Request, which
+	// net/http's own transport is what sets.
+	resp.Request = req
+	return resp, nil
 }
 
 // handleGraphQL answers the three queries the indexer issues. It routes on a
@@ -217,9 +225,26 @@ func (s *Server) handleTrees(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	ref := r.PathValue("ref")
+	// The caching proxy in front of GitHub Enterprise answers a renamed repo's tree
+	// with a 301 whose Location is the reason phrase rather than a URL. A client
+	// that follows it asks for that phrase as the ref and arrives past the proxy at
+	// the host's public front door, which refuses a request that never reached
+	// GitHub.
+	if repo.Renamed {
+		if ref != movedLocation {
+			w.Header().Set("Location", movedLocation)
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+		w.Header().Set("Server", "Varnish")
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 
 	var tree []any
-	for _, filePath := range repo.pathsAt(r.PathValue("ref")) {
+	for _, filePath := range repo.pathsAt(ref) {
 		tree = append(tree, map[string]any{"path": filePath, "type": "blob"})
 	}
 	writeJSON(w, map[string]any{"tree": tree, "truncated": false})

@@ -1,0 +1,11 @@
+# A repo renamed since the last owner listing stored it. The caching proxy in
+# front of the host answers its git tree with a redirect instead of a tree, so
+# there is no module directory to read and nothing to index. Its work item still
+# completes, rather than the queue handing the repo out again every re-indexing
+# TTL for as long as the stale name is stored.
+repo someorg/renamed
+renamed
+head 0011223344556677889900112233445566778899 2026-01-02T03:04:05Z
+-- someorg/renamed/go.mod --
+module go.example.com/renamed
+-- want --

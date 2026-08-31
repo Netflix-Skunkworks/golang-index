@@ -246,13 +246,7 @@ func TestModuleDirs(t *testing.T) {
 }
 
 func TestModuleDirs_NotFound(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(server.Close)
-
-	sut := NewGithubSCM(nil, server.URL, &http.Client{})
-	got, _, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	got, _, err := respondingSCM(t, http.StatusNotFound, nil).ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
 	if err != nil {
 		t.Fatalf("ModuleDirs returned error for a 404, want none: %v", err)
 	}
@@ -261,19 +255,43 @@ func TestModuleDirs_NotFound(t *testing.T) {
 	}
 }
 
-func forbiddenSCM(t *testing.T, headers map[string]string) *GithubSCM {
+// respondingSCM points a GithubSCM at a server that answers every request with
+// one status and set of headers.
+func respondingSCM(t *testing.T, status int, headers map[string]string) *GithubSCM {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for name, value := range headers {
 			w.Header().Set(name, value)
 		}
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(status)
 	}))
 	t.Cleanup(server.Close)
 	return NewGithubSCM(nil, server.URL, &http.Client{})
 }
 
+func TestModuleDirs_Redirected(t *testing.T) {
+	sut := respondingSCM(t, http.StatusMovedPermanently, map[string]string{"Location": "/api/v3/repos/someorg/renamed/git/trees/deadbeef"})
+	_, retryable, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	if err == nil {
+		t.Fatal("ModuleDirs returned no error for a redirect, want one")
+	}
+	if retryable {
+		t.Error("ModuleDirs reported a redirect as retryable")
+	}
+}
+
+func TestGoMod_Redirected(t *testing.T) {
+	sut := respondingSCM(t, http.StatusMovedPermanently, map[string]string{"Location": "/raw/someorg/renamed/v1.0.0/go.mod"})
+	_, _, retryable, err := sut.GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
+	if err == nil {
+		t.Fatal("GoMod returned no error for a redirect, want one")
+	}
+	if retryable {
+		t.Error("GoMod reported a redirect as retryable")
+	}
+}
+
 func TestModuleDirs_AccessDenied(t *testing.T) {
-	_, retryable, err := forbiddenSCM(t, nil).ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	_, retryable, err := respondingSCM(t, http.StatusForbidden, nil).ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
 	if err == nil {
 		t.Fatal("ModuleDirs returned no error for a 403, want one")
 	}
@@ -283,7 +301,7 @@ func TestModuleDirs_AccessDenied(t *testing.T) {
 }
 
 func TestModuleDirs_RateLimited(t *testing.T) {
-	sut := forbiddenSCM(t, map[string]string{"Gh-Limited-By": "search-elapsed-time", "Retry-After": "60"})
+	sut := respondingSCM(t, http.StatusForbidden, map[string]string{"Gh-Limited-By": "search-elapsed-time", "Retry-After": "60"})
 	_, retryable, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
 	if err == nil {
 		t.Fatal("ModuleDirs returned no error for a 403, want one")
@@ -294,7 +312,7 @@ func TestModuleDirs_RateLimited(t *testing.T) {
 }
 
 func TestGoMod_AccessDenied(t *testing.T) {
-	_, _, retryable, err := forbiddenSCM(t, nil).GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
+	_, _, retryable, err := respondingSCM(t, http.StatusForbidden, nil).GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
 	if err == nil {
 		t.Fatal("GoMod returned no error for a 403, want one")
 	}

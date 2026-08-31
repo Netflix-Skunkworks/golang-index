@@ -23,6 +23,10 @@ type Repo struct {
 	Tags     []Tag
 	// Files maps a repo-relative path ("go.mod", "tracing/go.mod") to its content.
 	Files map[string][]byte
+	// Renamed marks the repo as one that has been renamed since it was indexed.
+	// GraphQL still answers for its old name, so only its git tree changes; see
+	// [Server].
+	Renamed bool
 	// FilesAtRef overlays Files at one ref, keyed by ref and then by path: it can
 	// replace a file's content there or add one that no other ref has. Use it for
 	// content that differs between refs — a root go.mod whose module path gained a
