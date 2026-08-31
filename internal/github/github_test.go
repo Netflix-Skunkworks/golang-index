@@ -1,9 +1,11 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -370,6 +372,36 @@ func TestUnexpectedStatus(t *testing.T) {
 					t.Errorf("%s reported retryable=%v, want %v: %v", call.name, retryable, tc.wantRetryable, err)
 				}
 			})
+		}
+	}
+}
+
+// A status on its own doesn't say who answered, so the line has to carry the
+// evidence the verdict was reached from.
+func TestUnexpectedStatus_LogsTheResponse(t *testing.T) {
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	sut := respondingSCM(t, http.StatusForbidden, map[string]string{"Server": "Varnish", "Retry-After": "5"}, "Forbidden")
+	if _, _, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef"); err == nil {
+		t.Fatal("ModuleDirs returned no error for a 403, want one")
+	}
+
+	got := logged.String()
+	for _, want := range []string{
+		"/api/v3/repos/someorg/repo1/git/trees/deadbeef?recursive=1",
+		`status="403 Forbidden"`,
+		"server=Varnish",
+		"retryAfter=5",
+		`githubRequestID=""`,
+		"retryable=false",
+		"it never reached GitHub",
+		"body=Forbidden",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("logged %q, want it to mention %q", got, want)
 		}
 	}
 }

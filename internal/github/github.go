@@ -34,7 +34,7 @@ const listingTimeout = 60 * time.Second
 // Retry-After says nothing on its own, since any proxy can set it. Rejected
 // credentials are retryable too: they are rotated outside this process, and a repo
 // we cannot authenticate for has not been shown to hold nothing.
-func unexpectedStatus(resp *http.Response) (retryable bool, err error) {
+func unexpectedStatus(request *http.Request, resp *http.Response) (retryable bool, err error) {
 	// GitHub leads an error body with a "message" field, so a prefix of it is enough
 	// to classify by.
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
@@ -58,6 +58,24 @@ func unexpectedStatus(resp *http.Response) (retryable bool, err error) {
 	default:
 		reason = "GitHub answered, and answers a later pass the same way"
 	}
+
+	// Location is logged because a redirect is no longer followed, so where one
+	// leads shows up nowhere else.
+	slog.Warn("Unexpected status from GitHub",
+		"method", request.Method,
+		"url", request.URL,
+		"status", resp.Status,
+		"retryable", retryable,
+		"reason", reason,
+		"server", resp.Header.Get("Server"),
+		"location", resp.Header.Get("Location"),
+		"githubRequestID", resp.Header.Get("X-GitHub-Request-Id"),
+		"rateLimitRemaining", resp.Header.Get("X-RateLimit-Remaining"),
+		"rateLimitReset", resp.Header.Get("X-RateLimit-Reset"),
+		"retryAfter", resp.Header.Get("Retry-After"),
+		"limitedBy", resp.Header.Get("Gh-Limited-By"),
+		"body", string(body))
+
 	return retryable, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, reason)
 }
 
@@ -286,7 +304,7 @@ func (scm *GithubSCM) accountsPage(ctx context.Context, sinceID int) ([]account,
 
 	if resp.StatusCode != http.StatusOK {
 		// accountsSince retries a page it lost whatever the answer was.
-		_, err := unexpectedStatus(resp)
+		_, err := unexpectedStatus(request, resp)
 		return nil, fmt.Errorf("error listing accounts: %w", err)
 	}
 
@@ -453,7 +471,7 @@ func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string
 		return nil, false, false, nil
 	}
 	if resp.StatusCode != 200 {
-		retryable, err := unexpectedStatus(resp)
+		retryable, err := unexpectedStatus(request, resp)
 		return nil, false, retryable, fmt.Errorf("error querying raw github API for %s: %w", repo.fullName(), err)
 	}
 
@@ -506,7 +524,7 @@ func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) (
 		return nil, false, nil
 	}
 	if resp.StatusCode != 200 {
-		retryable, err := unexpectedStatus(resp)
+		retryable, err := unexpectedStatus(request, resp)
 		return nil, retryable, fmt.Errorf("error querying git trees API for %s: %w", repo.fullName(), err)
 	}
 

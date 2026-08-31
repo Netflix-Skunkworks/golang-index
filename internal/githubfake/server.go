@@ -65,8 +65,8 @@ func (rt roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	rec := httptest.NewRecorder()
 	rt.handler.ServeHTTP(rec, req)
 	resp := rec.Result()
-	// The client resolves a redirect's Location against resp.Request, which
-	// net/http's own transport is what sets.
+	// net/http's own transport sets this, and a client that follows redirects needs
+	// it to resolve a Location against: see the renamed repo in handleTrees.
 	resp.Request = req
 	return resp, nil
 }
