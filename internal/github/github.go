@@ -2,6 +2,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,20 +23,42 @@ const queryTimeout = 10 * time.Second
 // queries do.
 const listingTimeout = 60 * time.Second
 
-// repoAccessDenied distinguishes a denied repo from a rate limit, which GitHub
-// also reports as 403.
-func repoAccessDenied(resp *http.Response) bool {
-	if resp.StatusCode != http.StatusForbidden {
-		return false
-	}
-	rateLimited := resp.Header.Get("Gh-Limited-By") != "" ||
-		resp.Header.Get("Retry-After") != "" ||
-		resp.Header.Get("X-RateLimit-Remaining") == "0"
-	return !rateLimited
-}
+// unexpectedStatus describes a response the caller could not use, and reports
+// whether a later pass might be answered differently. The error is a reason for
+// the caller to wrap; it is never nil.
+//
+// GitHub serves every response with an X-GitHub-Request-Id, so one without it was
+// answered by something in front of GitHub, which answers a later pass the same
+// way. GitHub reports a spent primary rate limit with x-ratelimit-remaining: 0 and
+// a secondary one with Gh-Limited-By or a message naming it; both pass with time.
+// Retry-After says nothing on its own, since any proxy can set it. Rejected
+// credentials are retryable too: they are rotated outside this process, and a repo
+// we cannot authenticate for has not been shown to hold nothing.
+func unexpectedStatus(resp *http.Response) (retryable bool, err error) {
+	// GitHub leads an error body with a "message" field, so a prefix of it is enough
+	// to classify by.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 
-func redirected(resp *http.Response) bool {
-	return resp.StatusCode >= 300 && resp.StatusCode < 400
+	var reason string
+	switch {
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		reason = fmt.Sprintf("it redirects to %q, so the repo has probably been renamed", resp.Header.Get("Location"))
+	case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
+		retryable, reason = true, "the host is failing or throttling"
+	case resp.StatusCode == http.StatusUnauthorized:
+		retryable, reason = true, "the credentials were rejected"
+	case resp.Header.Get("X-GitHub-Request-Id") == "":
+		reason = "it carries no X-GitHub-Request-Id, so it never reached GitHub"
+	case resp.Header.Get("X-RateLimit-Remaining") == "0":
+		retryable, reason = true, "GitHub's primary rate limit is spent"
+	case resp.Header.Get("Gh-Limited-By") != "":
+		retryable, reason = true, fmt.Sprintf("GitHub reports a secondary rate limit (%s)", resp.Header.Get("Gh-Limited-By"))
+	case bytes.Contains(bytes.ToLower(body), []byte("rate limit")):
+		retryable, reason = true, "GitHub's message reports a rate limit"
+	default:
+		reason = "GitHub answered, and answers a later pass the same way"
+	}
+	return retryable, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, reason)
 }
 
 // githubClient wraps query interface from the shurcooL/githubv4 package so
@@ -262,7 +285,9 @@ func (scm *GithubSCM) accountsPage(ctx context.Context, sinceID int) ([]account,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d listing accounts", resp.StatusCode)
+		// accountsSince retries a page it lost whatever the answer was.
+		_, err := unexpectedStatus(resp)
+		return nil, fmt.Errorf("error listing accounts: %w", err)
 	}
 
 	var accounts []account
@@ -427,14 +452,9 @@ func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string
 	if resp.StatusCode == 404 {
 		return nil, false, false, nil
 	}
-	if redirected(resp) {
-		return nil, false, false, fmt.Errorf("raw github API redirected %s to %q; the repo has probably been renamed", repo.fullName(), resp.Header.Get("Location"))
-	}
-	if repoAccessDenied(resp) {
-		return nil, false, false, fmt.Errorf("access to %s denied by the raw github API", repo.fullName())
-	}
 	if resp.StatusCode != 200 {
-		return nil, false, true, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
+		retryable, err := unexpectedStatus(resp)
+		return nil, false, retryable, fmt.Errorf("error querying raw github API for %s: %w", repo.fullName(), err)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
@@ -485,14 +505,9 @@ func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) (
 	if resp.StatusCode == 404 {
 		return nil, false, nil
 	}
-	if redirected(resp) {
-		return nil, false, fmt.Errorf("git trees API redirected %s to %q; the repo has probably been renamed", repo.fullName(), resp.Header.Get("Location"))
-	}
-	if repoAccessDenied(resp) {
-		return nil, false, fmt.Errorf("access to %s denied by the git trees API", repo.fullName())
-	}
 	if resp.StatusCode != 200 {
-		return nil, true, fmt.Errorf("unexpected status code from git trees API. Status code: %d", resp.StatusCode)
+		retryable, err := unexpectedStatus(resp)
+		return nil, retryable, fmt.Errorf("error querying git trees API for %s: %w", repo.fullName(), err)
 	}
 
 	var tree treeResponse

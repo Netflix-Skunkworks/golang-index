@@ -246,7 +246,7 @@ func TestModuleDirs(t *testing.T) {
 }
 
 func TestModuleDirs_NotFound(t *testing.T) {
-	got, _, err := respondingSCM(t, http.StatusNotFound, nil).ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
+	got, _, err := respondingSCM(t, http.StatusNotFound, nil, "").ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
 	if err != nil {
 		t.Fatalf("ModuleDirs returned error for a 404, want none: %v", err)
 	}
@@ -256,68 +256,121 @@ func TestModuleDirs_NotFound(t *testing.T) {
 }
 
 // respondingSCM points a GithubSCM at a server that answers every request with
-// one status and set of headers.
-func respondingSCM(t *testing.T, status int, headers map[string]string) *GithubSCM {
+// one status, set of headers, and body.
+func respondingSCM(t *testing.T, status int, headers map[string]string, body string) *GithubSCM {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for name, value := range headers {
 			w.Header().Set(name, value)
 		}
 		w.WriteHeader(status)
+		if _, err := w.Write([]byte(body)); err != nil {
+			// Can't call t.Fatal off the test goroutine, so use Errorf.
+			t.Errorf("writing response body: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 	return NewGithubSCM(nil, server.URL, &http.Client{})
 }
 
-func TestModuleDirs_Redirected(t *testing.T) {
-	sut := respondingSCM(t, http.StatusMovedPermanently, map[string]string{"Location": "/api/v3/repos/someorg/renamed/git/trees/deadbeef"})
-	_, retryable, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
-	if err == nil {
-		t.Fatal("ModuleDirs returned no error for a redirect, want one")
-	}
-	if retryable {
-		t.Error("ModuleDirs reported a redirect as retryable")
-	}
+// githubRequestID stands in for the X-GitHub-Request-Id GitHub serves every
+// response with.
+const githubRequestID = "0123:4567:89ABCD:EF0123:456789AB"
+
+// unexpectedStatuses are responses neither REST call can use, and whether a later
+// pass might be answered differently.
+var unexpectedStatuses = []struct {
+	name          string
+	status        int
+	headers       map[string]string
+	body          string
+	wantRetryable bool
+}{
+	{
+		name:    "a redirect, so the repo moved",
+		status:  http.StatusMovedPermanently,
+		headers: map[string]string{"Location": "/api/v3/repos/someorg/renamed/git/trees/deadbeef"},
+	},
+	{
+		// What a caching proxy in front of the host answers for a renamed repo. The
+		// Retry-After reads as a rate limit, but the request never reached GitHub.
+		name:    "a 403 from in front of GitHub",
+		status:  http.StatusForbidden,
+		headers: map[string]string{"Server": "Varnish", "Retry-After": "5"},
+	},
+	{
+		name:    "GitHub refusing the repo",
+		status:  http.StatusForbidden,
+		headers: map[string]string{"X-GitHub-Request-Id": githubRequestID},
+	},
+	{
+		name:          "GitHub's primary rate limit",
+		status:        http.StatusForbidden,
+		headers:       map[string]string{"X-GitHub-Request-Id": githubRequestID, "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1758000000"},
+		wantRetryable: true,
+	},
+	{
+		name:          "a secondary rate limit",
+		status:        http.StatusForbidden,
+		headers:       map[string]string{"X-GitHub-Request-Id": githubRequestID, "Gh-Limited-By": "search-elapsed-time", "Retry-After": "60"},
+		wantRetryable: true,
+	},
+	{
+		name:          "a secondary rate limit named only in the message",
+		status:        http.StatusForbidden,
+		headers:       map[string]string{"X-GitHub-Request-Id": githubRequestID},
+		body:          `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`,
+		wantRetryable: true,
+	},
+	{
+		name:          "the host failing",
+		status:        http.StatusBadGateway,
+		wantRetryable: true,
+	},
+	{
+		// Credentials are rotated outside this process, so a later pass may carry
+		// working ones. Reading this as permanent would index every repo as empty.
+		name:          "rejected credentials",
+		status:        http.StatusUnauthorized,
+		headers:       map[string]string{"X-GitHub-Request-Id": githubRequestID},
+		body:          `{"message":"Bad credentials"}`,
+		wantRetryable: true,
+	},
+	{
+		name:          "the host throttling",
+		status:        http.StatusTooManyRequests,
+		wantRetryable: true,
+	},
 }
 
-func TestGoMod_Redirected(t *testing.T) {
-	sut := respondingSCM(t, http.StatusMovedPermanently, map[string]string{"Location": "/raw/someorg/renamed/v1.0.0/go.mod"})
-	_, _, retryable, err := sut.GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
-	if err == nil {
-		t.Fatal("GoMod returned no error for a redirect, want one")
-	}
-	if retryable {
-		t.Error("GoMod reported a redirect as retryable")
-	}
+// restCalls are the calls that have to answer for a response they cannot use,
+// reduced to the answer they give.
+var restCalls = []struct {
+	name string
+	ask  func(context.Context, *GithubSCM) (retryable bool, err error)
+}{
+	{"ModuleDirs", func(ctx context.Context, scm *GithubSCM) (bool, error) {
+		_, retryable, err := scm.ModuleDirs(ctx, "someorg/repo1", "deadbeef")
+		return retryable, err
+	}},
+	{"GoMod", func(ctx context.Context, scm *GithubSCM) (bool, error) {
+		_, _, retryable, err := scm.GoMod(ctx, "someorg/repo1", "v1.0.0", "")
+		return retryable, err
+	}},
 }
 
-func TestModuleDirs_AccessDenied(t *testing.T) {
-	_, retryable, err := respondingSCM(t, http.StatusForbidden, nil).ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
-	if err == nil {
-		t.Fatal("ModuleDirs returned no error for a 403, want one")
-	}
-	if retryable {
-		t.Error("ModuleDirs reported a denied repo as retryable")
-	}
-}
-
-func TestModuleDirs_RateLimited(t *testing.T) {
-	sut := respondingSCM(t, http.StatusForbidden, map[string]string{"Gh-Limited-By": "search-elapsed-time", "Retry-After": "60"})
-	_, retryable, err := sut.ModuleDirs(t.Context(), "someorg/repo1", "deadbeef")
-	if err == nil {
-		t.Fatal("ModuleDirs returned no error for a 403, want one")
-	}
-	if !retryable {
-		t.Error("ModuleDirs reported a rate limit as not retryable")
-	}
-}
-
-func TestGoMod_AccessDenied(t *testing.T) {
-	_, _, retryable, err := respondingSCM(t, http.StatusForbidden, nil).GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")
-	if err == nil {
-		t.Fatal("GoMod returned no error for a 403, want one")
-	}
-	if retryable {
-		t.Error("GoMod reported a denied repo as retryable")
+func TestUnexpectedStatus(t *testing.T) {
+	for _, call := range restCalls {
+		for _, tc := range unexpectedStatuses {
+			t.Run(call.name+"/"+tc.name, func(t *testing.T) {
+				retryable, err := call.ask(t.Context(), respondingSCM(t, tc.status, tc.headers, tc.body))
+				if err == nil {
+					t.Fatalf("%s returned no error for a %d, want one", call.name, tc.status)
+				}
+				if retryable != tc.wantRetryable {
+					t.Errorf("%s reported retryable=%v, want %v: %v", call.name, retryable, tc.wantRetryable, err)
+				}
+			})
+		}
 	}
 }
 
