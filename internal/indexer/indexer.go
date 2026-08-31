@@ -240,9 +240,12 @@ func (ix *RepoTagsIndexer) repoModuleVersions(ctx context.Context, orgRepoName s
 
 // runQueue drives one stage: it calls once repeatedly until ctx is cancelled
 // (returning ctx.Err()). A retryable error is logged and backed off on; a
-// non-retryable one is returned. A check that found work is followed by an eager
-// one, and a check that didn't waits workCheckPeriod plus a 1-60s jitter, so the
-// workers don't all poll in lockstep.
+// non-retryable one is returned. A pass that doesn't error resets the backoff,
+// which otherwise only ever grows, leaving a worker that saw a few retryable
+// errors sleeping MaxInterval between passes for the rest of the process's life.
+// A check that found work is followed by an eager one, and a check that didn't
+// waits workCheckPeriod plus a 1-60s jitter, so the workers don't all poll in
+// lockstep.
 func runQueue(ctx context.Context, logger *slog.Logger, bo *backoff.ExponentialBackOff, workCheckPeriod time.Duration, once func(context.Context) (gotWork, retryable bool, err error)) error {
 	if bo == nil {
 		bo = newGithubBackoff()
@@ -265,6 +268,7 @@ func runQueue(ctx context.Context, logger *slog.Logger, bo *backoff.ExponentialB
 			}
 			continue
 		}
+		bo.Reset()
 		if gotWork {
 			continue
 		}
