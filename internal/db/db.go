@@ -244,11 +244,12 @@ SET indexing_finished = NOW();`
 // transaction, which holds the owner's next pass off until the re-index period
 // has passed.
 //
-// An empty orgRepoNames is an owner holding no Go repos, not an error.
+// An empty orgRepoNames is an owner holding no Go repos, not an error: every repo
+// stored for it is stale, so they all go.
 //
-// TODO(jbarkhuysen): The given orgRepoNames should be treated as authoratative.
-// Any of the owner's repos in GitHub not in this list should be deleted (and their
-// repo tags).
+// WARNING: The given repos are treated as authoritative: any of the owner's stored
+// repos not in the given list will be deleted, along with its module versions.
+// This function SHOULD NOT be provided partial listings.
 func (d *DB) StoreOwnerRepos(ctx context.Context, ownerLogin string, orgRepoNames []string) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -256,8 +257,36 @@ func (d *DB) StoreOwnerRepos(ctx context.Context, ownerLogin string, orgRepoName
 	}
 	defer tx.Rollback()
 
-	// An empty array selects no rows, so an owner with no Go repos inserts nothing.
+	// Module versions go first: repo_module_versions references repos, with no ON
+	// DELETE CASCADE. A repo belongs to the owner its name starts with, which is all
+	// that ties a repo to an owner. An absent array deletes every one of them, which
+	// is what an owner with no Go repos left means.
 	query := `
+DELETE FROM repo_module_versions rmv
+WHERE starts_with(rmv.org_repo_name, $1 || '/')
+AND NOT EXISTS (
+    SELECT 1
+    FROM unnest($2::text[]) AS keep(org_repo_name)
+    WHERE keep.org_repo_name = rmv.org_repo_name
+);`
+	if _, err := tx.ExecContext(ctx, query, ownerLogin, pq.Array(orgRepoNames)); err != nil {
+		return fmt.Errorf("StoreOwnerRepos:\nquery: %s\nerror: %v", query, err)
+	}
+
+	query = `
+DELETE FROM repos r
+WHERE starts_with(r.org_repo_name, $1 || '/')
+AND NOT EXISTS (
+    SELECT 1
+    FROM unnest($2::text[]) AS keep(org_repo_name)
+    WHERE keep.org_repo_name = r.org_repo_name
+);`
+	if _, err := tx.ExecContext(ctx, query, ownerLogin, pq.Array(orgRepoNames)); err != nil {
+		return fmt.Errorf("StoreOwnerRepos:\nquery: %s\nerror: %v", query, err)
+	}
+
+	// An empty array selects no rows, so an owner with no Go repos inserts nothing.
+	query = `
 INSERT INTO repos (org_repo_name)
 SELECT * FROM unnest($1::text[])
 ON CONFLICT (org_repo_name) DO NOTHING;`

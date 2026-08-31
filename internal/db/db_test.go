@@ -139,24 +139,56 @@ func TestStoreOwnerRepos(t *testing.T) {
 		t.Errorf("StoreOwnerRepos: -want,+got: %s", diff)
 	}
 
-	// Storing a subset of repos preserves previously stored ones.
+	// The listing is authoritative, so a repo it no longer carries is dropped.
 	if err := sutDB.StoreOwnerRepos(t.Context(), "foo", []string{"foo/bar"}); err != nil {
 		t.Fatal(err)
 	}
 	gotRepos = slices.Sorted(maps.Keys(repoModuleVersions(t, sqlDB)))
-	if diff := cmp.Diff(wantRepos, gotRepos); diff != "" {
+	if diff := cmp.Diff([]string{"foo/bar"}, gotRepos); diff != "" {
+		t.Errorf("StoreOwnerRepos: -want,+got: %s", diff)
+	}
+}
+
+func TestStoreOwnerRepos_DropsAGoneRepoWithItsModuleVersions(t *testing.T) {
+	// A repo that was renamed or deleted keeps its rows otherwise, and its stale name
+	// stays in the work queue for as long as they're there.
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+
+	created := time.Now().UTC()
+	kept := &db.RepoModuleVersion{OrgRepoName: "foo/kept", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/kept", Created: created}
+	gone := &db.RepoModuleVersion{OrgRepoName: "foo/gone", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/gone", Created: created}
+	// An owner whose login merely starts with this one's: not this listing's to drop.
+	similarOwner := &db.RepoModuleVersion{OrgRepoName: "foobar/thing", Version: "v0.0.1", ModulePath: "github.somecompany.net/foobar/thing", Created: created}
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{kept, gone, similarOwner})
+
+	if err := sutDB.StoreOwnerRepos(t.Context(), "foo", []string{"foo/kept"}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string][]*db.RepoModuleVersion{
+		"foo/kept":     {kept},
+		"foobar/thing": {similarOwner},
+	}
+	if diff := cmp.Diff(want, repoModuleVersions(t, sqlDB), cmpopts.EquateApproxTime(time.Second)); diff != "" {
 		t.Errorf("StoreOwnerRepos: -want,+got: %s", diff)
 	}
 }
 
 func TestStoreOwnerRepos_NoRepos(t *testing.T) {
-	// An owner with no Go repos still completes its work item.
+	// An owner with no Go repos left keeps none of the repos it had, and still
+	// completes its work item.
 	sutDB, sqlDB := setupDB(t)
 	resetTables(t, sqlDB)
 	setSingleOwnerIndexing(t, sqlDB, "foo", time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour))
+	populateRepoModuleVersions(t, sqlDB, []*db.RepoModuleVersion{{OrgRepoName: "foo/bar", Version: "v0.0.1", ModulePath: "github.somecompany.net/foo/bar", Created: time.Now().UTC()}})
 
 	if err := sutDB.StoreOwnerRepos(t.Context(), "foo", nil); err != nil {
 		t.Fatal(err)
+	}
+
+	if diff := cmp.Diff(map[string][]*db.RepoModuleVersion{}, repoModuleVersions(t, sqlDB)); diff != "" {
+		t.Errorf("StoreOwnerRepos: -want,+got: %s", diff)
 	}
 
 	ownerToReindex, _, gotWork, err := sutDB.NextReindexOwnerReposWork(t.Context(), 0, time.Hour)
