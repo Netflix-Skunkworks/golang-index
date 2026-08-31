@@ -276,13 +276,21 @@ WHERE owner_login = $1;`
 func (d *DB) StoreRepoModuleVersions(ctx context.Context, orgRepoName string, repoModuleVersions []*RepoModuleVersion) error {
 	// The incoming rows, zipped into parallel arrays so both statements below can
 	// take them as three parameters rather than three per row.
-	modulePaths := make([]string, len(repoModuleVersions))
-	versions := make([]string, len(repoModuleVersions))
-	createds := make([]string, len(repoModuleVersions))
-	for i, rt := range repoModuleVersions {
-		modulePaths[i] = rt.ModulePath
-		versions[i] = rt.Version
-		createds[i] = rt.Created.Format(time.RFC3339)
+	type modulePathVersion struct{ modulePath, version string }
+	positions := make(map[modulePathVersion]int, len(repoModuleVersions))
+	modulePaths := make([]string, 0, len(repoModuleVersions))
+	versions := make([]string, 0, len(repoModuleVersions))
+	createds := make([]string, 0, len(repoModuleVersions))
+	for _, rt := range repoModuleVersions {
+		mpv := modulePathVersion{rt.ModulePath, rt.Version}
+		if i, ok := positions[mpv]; ok {
+			createds[i] = rt.Created.Format(time.RFC3339)
+			continue
+		}
+		positions[mpv] = len(modulePaths)
+		modulePaths = append(modulePaths, rt.ModulePath)
+		versions = append(versions, rt.Version)
+		createds = append(createds, rt.Created.Format(time.RFC3339))
 	}
 
 	tx, err := d.db.BeginTx(ctx, nil)

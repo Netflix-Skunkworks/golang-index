@@ -233,6 +233,27 @@ func TestStoreRepoModuleVersions_Colliding(t *testing.T) {
 	}
 }
 
+func TestStoreRepoModuleVersions_Duplicated(t *testing.T) {
+	sutDB, sqlDB := setupDB(t)
+	resetTables(t, sqlDB)
+
+	if err := sutDB.StoreOwnerRepos(t.Context(), "foo", []string{"foo/dupe"}); err != nil {
+		t.Fatal(err)
+	}
+
+	const pseudo = "v0.0.0-20260102030405-abcdef012345"
+	firstCreated := &db.RepoModuleVersion{OrgRepoName: "foo/dupe", Version: pseudo, ModulePath: "github.somecompany.net/foo/dupe", Created: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
+	lastCreated := &db.RepoModuleVersion{OrgRepoName: "foo/dupe", Version: pseudo, ModulePath: "github.somecompany.net/foo/dupe", Created: time.Date(2026, 6, 7, 8, 9, 10, 0, time.UTC)}
+	if err := sutDB.StoreRepoModuleVersions(t.Context(), "foo/dupe", []*db.RepoModuleVersion{firstCreated, lastCreated}); err != nil {
+		t.Fatalf("StoreRepoModuleVersions with duplicated module versions: %v", err)
+	}
+
+	want := map[string][]*db.RepoModuleVersion{"foo/dupe": {lastCreated}}
+	if diff := cmp.Diff(want, repoModuleVersions(t, sqlDB), cmpopts.EquateApproxTime(time.Second)); diff != "" {
+		t.Errorf("StoreRepoModuleVersions: -want,+got: %s", diff)
+	}
+}
+
 func TestStoreRepoModuleVersions_NoModuleVersions(t *testing.T) {
 	// A repo that yields no module versions is stored too: every row it has is stale,
 	// so they all go, and its work item is completed so it waits out the re-index
