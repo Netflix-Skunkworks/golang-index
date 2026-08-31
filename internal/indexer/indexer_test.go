@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -420,5 +421,34 @@ func TestRepoTagsIndexer_RetriesAfterGitHubError(t *testing.T) {
 	}}}
 	if diff := cmp.Diff(want, stored); diff != "" {
 		t.Errorf("stored repo tags mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRunQueue_ResetsBackoffAfterSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = time.Millisecond
+	bo.RandomizationFactor = 0
+
+	passes := 0
+	once := func(context.Context) (gotWork, retryable bool, err error) {
+		passes++
+		if passes == 1 {
+			return true, true, errors.New("github boom")
+		}
+		cancel()
+		return true, false, nil
+	}
+
+	if err := runQueue(ctx, slog.Default(), bo, time.Hour, once); !errors.Is(err, context.Canceled) {
+		t.Errorf("runQueue returned %v, want context.Canceled", err)
+	}
+	if passes != 2 {
+		t.Errorf("runQueue made %d passes, want 2 (one failure, one success)", passes)
+	}
+	if got := bo.NextBackOff(); got != bo.InitialInterval {
+		t.Errorf("backoff after a successful pass = %v, want the initial %v", got, bo.InitialInterval)
 	}
 }
