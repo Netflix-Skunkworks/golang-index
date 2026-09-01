@@ -34,6 +34,10 @@ func repoAccessDenied(resp *http.Response) bool {
 	return !rateLimited
 }
 
+func redirected(resp *http.Response) bool {
+	return resp.StatusCode >= 300 && resp.StatusCode < 400
+}
+
 // githubClient wraps query interface from the shurcooL/githubv4 package so
 // that we can mock github graphql query responses in tests.
 type githubClient interface {
@@ -57,16 +61,31 @@ func NewGithubSCM(client githubClient, baseURL string, httpClient *http.Client) 
 	return &GithubSCM{
 		graphqlClient: client,
 		baseURL:       baseURL,
-		httpClient:    httpClient,
+		httpClient:    withoutRedirects(httpClient),
 	}
+}
+
+// withoutRedirects returns a copy of client that hands a 3xx response back rather
+// than following it. A redirect leads off baseURL, and so away from any proxy in
+// front of the GitHub host that supplies the credentials; where it leads is worth
+// reporting rather than following. A nil client, which the tests that exercise
+// only GraphQL pass, stays nil.
+func withoutRedirects(httpClient *http.Client) *http.Client {
+	if httpClient == nil {
+		return nil
+	}
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
 }
 
 // NewEnterpriseSCM builds a GithubSCM for a GitHub Enterprise host, wiring the
 // GraphQL client (at baseURL+"/api/graphql") and the raw/REST calls to the same
 // httpClient.
 func NewEnterpriseSCM(baseURL string, httpClient *http.Client) *GithubSCM {
-	graphql := githubv4.NewEnterpriseClient(baseURL+"/api/graphql", httpClient)
-	return NewGithubSCM(graphql, baseURL, httpClient)
+	scm := NewGithubSCM(nil, baseURL, httpClient)
+	scm.graphqlClient = githubv4.NewEnterpriseClient(baseURL+"/api/graphql", scm.httpClient)
+	return scm
 }
 
 type queryPageInfo struct {
@@ -408,6 +427,9 @@ func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string
 	if resp.StatusCode == 404 {
 		return nil, false, false, nil
 	}
+	if redirected(resp) {
+		return nil, false, false, fmt.Errorf("raw github API redirected %s to %q; the repo has probably been renamed", repo.fullName(), resp.Header.Get("Location"))
+	}
 	if repoAccessDenied(resp) {
 		return nil, false, false, fmt.Errorf("access to %s denied by the raw github API", repo.fullName())
 	}
@@ -462,6 +484,9 @@ func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) (
 
 	if resp.StatusCode == 404 {
 		return nil, false, nil
+	}
+	if redirected(resp) {
+		return nil, false, fmt.Errorf("git trees API redirected %s to %q; the repo has probably been renamed", repo.fullName(), resp.Header.Get("Location"))
 	}
 	if repoAccessDenied(resp) {
 		return nil, false, fmt.Errorf("access to %s denied by the git trees API", repo.fullName())

@@ -60,11 +60,12 @@ goes wherever it reads best.
 | `head` | oid, RFC 3339 date | The default branch's HEAD commit and its date. Omit for a repo with no commits. |
 | `tag` | name, RFC 3339 date | A git tag and its date. Subdirectory tags (`tracing/v2.0.0`) are fine. |
 | `untag` | name | Removes a tag. Only useful in a `cycle` section. |
+| `renamed` | — | The repo was renamed after it was indexed, so its git tree comes back as the redirect the proxy in front of the host answers with. |
 | `cycle` | — | Splits the block: everything after it is applied between the two index cycles. |
 | `skip` | reason | Reports the case as skipped instead of running it. |
 
-`repo`, `head`, `tag`, and `untag` apply to a repo; `cycle` and `skip` apply to the
-whole case.
+`repo`, `head`, `tag`, `untag`, and `renamed` apply to a repo; `cycle` and `skip`
+apply to the whole case.
 
 ### `skip`
 

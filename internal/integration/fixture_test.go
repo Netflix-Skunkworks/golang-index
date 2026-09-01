@@ -226,6 +226,11 @@ func (f *fixture) applyDirectives(lines []string, declare bool) error {
 				return err
 			}
 			current.Tags = append(current.Tags, githubfake.Tag{Name: name, Date: date})
+		case "renamed":
+			if len(fields) != 1 {
+				return fmt.Errorf("%q: renamed takes no arguments", line)
+			}
+			current.Renamed = true
 		case "untag":
 			if len(fields) != 2 {
 				return fmt.Errorf("%q: untag takes a tag name", line)

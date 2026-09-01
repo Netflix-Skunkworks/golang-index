@@ -179,6 +179,26 @@ func TestServerRefOverrides(t *testing.T) {
 	})
 }
 
+// A renamed repo's git tree is a redirect the indexer must not follow off the
+// proxy: following it reaches the 403 the fake serves next, which reads as a rate
+// limit and would be retried forever.
+func TestServerModuleDirs_Renamed(t *testing.T) {
+	repo := sampleRepo()
+	repo.Renamed = true
+	scm := newSCM(t, repo)
+
+	got, retryable, err := scm.ModuleDirs(t.Context(), "someorg/thing", sampleHeadOID)
+	if err == nil {
+		t.Fatal("ModuleDirs: no error for a renamed repo, want one")
+	}
+	if retryable {
+		t.Errorf("ModuleDirs reported a renamed repo as retryable: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ModuleDirs() = %v, want no dirs for a renamed repo", got)
+	}
+}
+
 func TestServerModuleDirs(t *testing.T) {
 	scm := newSCM(t, sampleRepo())
 
