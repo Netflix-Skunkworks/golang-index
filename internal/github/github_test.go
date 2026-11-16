@@ -174,7 +174,7 @@ func TestGoMod(t *testing.T) {
 	const goMod = "module go.example.com/thing\n"
 
 	server := createTestGoModServer(t, authToken, []tagResponse{{tag: "v1.0.0", goModContent: goMod}})
-	sut := NewGithubSCM(nil, server.URL, TokenClient(authToken))
+	sut := NewEnterpriseSCM(server.URL, TokenClient(authToken))
 
 	t.Run("found", func(t *testing.T) {
 		content, found, _, err := sut.GoMod(t.Context(), "someorg/repo1", "v1.0.0", "")

@@ -2,6 +2,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -377,16 +378,26 @@ func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (oid s
 	return string(commit.OID), commit.CommittedDate.UTC(), false, nil
 }
 
-// goModQuery fetches (and then holds the response for) one go.mod blob.
-type goModQuery struct {
-	Repository struct {
-		Object *struct {
-			Blob struct {
-				Text        *githubv4.String
-				IsTruncated githubv4.Boolean
-			} `graphql:"... on Blob"`
-		} `graphql:"object(expression: $expression)"`
-	} `graphql:"repository(owner: $repoOrg, name: $repoName)"`
+// goModGraphQL fetches one go.mod blob. Hand-rolled rather than through the
+// githubv4 client because that client collapses all non-200 responses into an
+// untyped error, and a denied repo (403) must not be retried while a rate limit
+// (also 403) must.
+const goModGraphQL = `query($repoOrg: String!, $repoName: String!, $expression: String!) {
+  repository(owner: $repoOrg, name: $repoName) {
+    object(expression: $expression) { ... on Blob { text isTruncated } }
+  }
+}`
+
+// goModResponse is the subset of the blob query response we read.
+type goModResponse struct {
+	Data struct {
+		Repository struct {
+			Object *struct {
+				Text        *string `json:"text"`
+				IsTruncated bool    `json:"isTruncated"`
+			} `json:"object"`
+		} `json:"repository"`
+	} `json:"data"`
 }
 
 // GoMod fetches the go.mod at subdir (the repo root when subdir is "") for the
@@ -412,27 +423,50 @@ func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string
 	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 
-	var q goModQuery
-	variables := map[string]any{
-		"repoOrg":    githubv4.String(repo.org),
-		"repoName":   githubv4.String(repo.name),
-		"expression": githubv4.String(ref + ":" + goModPath),
+	body, err := json.Marshal(map[string]any{
+		"query": goModGraphQL,
+		"variables": map[string]any{
+			"repoOrg":    repo.org,
+			"repoName":   repo.name,
+			"expression": ref + ":" + goModPath,
+		},
+	})
+	if err != nil {
+		return nil, false, false, fmt.Errorf("error building go.mod query for %s: %v", repo.fullName(), err)
 	}
-	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
+	request, err := http.NewRequestWithContext(queryCtx, http.MethodPost, scm.baseURL+"/api/graphql", bytes.NewReader(body))
+	if err != nil {
+		return nil, false, false, fmt.Errorf("error building go.mod query for %s: %v", repo.fullName(), err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	resp, err := scm.httpClient.Do(request)
+	if err != nil {
 		return nil, false, true, fmt.Errorf("error querying go.mod of %s at %s: %w", repo.fullName(), ref, err)
+	}
+	defer resp.Body.Close()
+
+	if repoAccessDenied(resp) {
+		return nil, false, false, fmt.Errorf("access to %s denied by the graphql API", repo.fullName())
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, true, fmt.Errorf("unexpected status code querying go.mod of %s at %s. Status code: %d", repo.fullName(), ref, resp.StatusCode)
+	}
+
+	var out goModResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, false, true, fmt.Errorf("error decoding go.mod response of %s at %s: %v", repo.fullName(), ref, err)
 	}
 
 	// No object at that expression: no go.mod there.
-	if q.Repository.Object == nil || q.Repository.Object.Blob.Text == nil {
+	if out.Data.Repository.Object == nil || out.Data.Repository.Object.Text == nil {
 		return nil, false, false, nil
 	}
-	if q.Repository.Object.Blob.IsTruncated {
+	if out.Data.Repository.Object.IsTruncated {
 		return nil, false, false, fmt.Errorf("go.mod of %s at %s is too large to read", repo.fullName(), ref)
 	}
 
-	bodyBytes := []byte(*q.Repository.Object.Blob.Text)
-
-	return bodyBytes, true, false, nil
+	return []byte(*out.Data.Repository.Object.Text), true, false, nil
 }
 
 // treeResponse is the subset of the git trees API response we read.
