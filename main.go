@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,10 @@ import (
 var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
 var githubBaseURL = flag.String("githubBaseURL", "", "base URL for API and raw requests, e.g. https://gitproxy.mycompany.net to route through a proxy. defaults to https://<githubHostName>. module paths and repo URLs always use -githubHostName")
+
+var githubHeaders headerFlag // -githubHeader, repeatable.
+var githubOwnerHeader = flag.String("githubOwnerHeader", "", "name of a header to set, per request, to the repository owner the request concerns. for a proxy that selects credentials per organization")
+var githubOwnersURL = flag.String("githubOwnersURL", "", "URL serving a JSON array of owner logins to index. when set, the host is not enumerated for owners")
 
 var githubAuthToken = flag.String("githubAuthToken", "", "github personal access token. alternative to -githubTLSClientCertFile/-githubTLSClientKeyFile")
 var githubTLSClientCertFile = flag.String("githubTLSClientCertFile", "", "client certificate for mutual-TLS auth to the github host. alternative to -githubAuthToken")
@@ -41,6 +46,7 @@ var repoTagsReindexPeriod = flag.Duration("repoTagsReindexPeriod", 24*time.Hour,
 var repoTagsReindexTTL = flag.Duration("repoTagsReindexTTL", 10*time.Minute, "TTL that an indexing worker has for re-indexing all tags for a particular repo")
 
 func main() {
+	flag.Var(&githubHeaders, "githubHeader", "header to send on every github request, as name:value. repeatable")
 	flag.Parse()
 
 	if *githubHostName == "" {
@@ -56,6 +62,14 @@ func main() {
 
 	ctx := context.Background()
 
+	baseURL := *githubBaseURL
+	if baseURL == "" {
+		baseURL = fmt.Sprintf("https://%s", *githubHostName)
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	httpClient = github.HeaderClient(httpClient, githubHeaders, *githubOwnerHeader)
+
 	pgUsername, pgPassword, pgHost, pgPort, pgDbname, err := postgresDetails()
 	if err != nil {
 		slog.Error(err.Error())
@@ -67,13 +81,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	baseURL := *githubBaseURL
-	if baseURL == "" {
-		baseURL = fmt.Sprintf("https://%s", *githubHostName)
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-
 	githubSCM := github.NewEnterpriseSCM(baseURL, httpClient)
+
+	var ownerLister interface {
+		Owners(context.Context) ([]string, error)
+	} = githubSCM
+	if *githubOwnersURL != "" {
+		slog.Info("fetching owners from a remote source", "url", *githubOwnersURL)
+		ownerLister = &urlOwners{url: *githubOwnersURL, client: &http.Client{Timeout: 30 * time.Second}}
+	}
 
 	server := newServer(*port, idb, *githubHostName)
 
@@ -81,7 +97,7 @@ func main() {
 
 	allOwnersIndexer := &indexer.AllOwnersIndexer{
 		DB:              idb,
-		Lister:          githubSCM,
+		Lister:          ownerLister,
 		WorkCheckPeriod: *allOwnersReindexWorkCheckPeriod,
 		ReindexTTL:      *allOwnersReindexTTL,
 		ReindexPeriod:   *allOwnersReindexPeriod,
@@ -124,6 +140,49 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("shutting down gracefully")
+}
+
+// headerFlag collects repeated name:value flags.
+type headerFlag map[string]string
+
+func (h headerFlag) String() string { return fmt.Sprint(map[string]string(h)) }
+
+func (h *headerFlag) Set(v string) error {
+	name, value, ok := strings.Cut(v, ":")
+	if !ok {
+		return fmt.Errorf("header %q is not name:value", v)
+	}
+	if *h == nil {
+		*h = headerFlag{}
+	}
+	(*h)[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	return nil
+}
+
+// urlOwners lists owners from a remote source serving a JSON array of logins.
+type urlOwners struct {
+	url    string
+	client *http.Client
+}
+
+func (u *urlOwners) Owners(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("owners source %s: %s", u.url, resp.Status)
+	}
+	var owners []string
+	if err := json.NewDecoder(resp.Body).Decode(&owners); err != nil {
+		return nil, fmt.Errorf("owners source %s: %v", u.url, err)
+	}
+	return owners, nil
 }
 
 func newGithubHTTPClient() (*http.Client, error) {
