@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -23,13 +24,7 @@ var githubBaseURL = flag.String("githubBaseURL", "", "base URL for API and raw r
 
 var githubHeaders headerFlag // -githubHeader, repeatable.
 var githubOwnerHeader = flag.String("githubOwnerHeader", "", "name of a header to set, per request, to the repository owner the request concerns. for a proxy that selects credentials per organization")
-var githubOwners = flag.String("githubOwners", "", "comma-separated owners to index. when set, the host is not enumerated for owners")
-
-// THROWAWAY, with probe.go.
-var probeEnumeration = flag.Bool("probeEnumeration", false, "log what this identity can enumerate on the github host, at startup")
-var probeEnterpriseSlug = flag.String("probeEnterpriseSlug", "", "enterprise slug to probe for organizations. skipped when empty")
-var probeOwner = flag.String("probeOwner", "", "owner to set on -githubOwnerHeader during -probeEnumeration")
-var probeOnly = flag.Bool("probeOnly", false, "exit after -probeEnumeration, without indexing. needs no database")
+var githubOwnersURL = flag.String("githubOwnersURL", "", "URL serving a JSON array of owner logins to index. when set, the host is not enumerated for owners")
 
 var githubAuthToken = flag.String("githubAuthToken", "", "github personal access token. alternative to -githubTLSClientCertFile/-githubTLSClientKeyFile")
 var githubTLSClientCertFile = flag.String("githubTLSClientCertFile", "", "client certificate for mutual-TLS auth to the github host. alternative to -githubAuthToken")
@@ -75,13 +70,6 @@ func main() {
 
 	httpClient = github.HeaderClient(httpClient, githubHeaders, *githubOwnerHeader)
 
-	if *probeEnumeration {
-		runEnumerationProbe(ctx, baseURL, httpClient, *probeEnterpriseSlug, *probeOwner)
-	}
-	if *probeOnly {
-		return
-	}
-
 	pgUsername, pgPassword, pgHost, pgPort, pgDbname, err := postgresDetails()
 	if err != nil {
 		slog.Error(err.Error())
@@ -98,10 +86,9 @@ func main() {
 	var ownerLister interface {
 		Owners(context.Context) ([]string, error)
 	} = githubSCM
-	if *githubOwners != "" {
-		owners := strings.Split(*githubOwners, ",")
-		slog.Info("indexing a fixed set of owners", "owners", owners)
-		ownerLister = fixedOwners(owners)
+	if *githubOwnersURL != "" {
+		slog.Info("fetching owners from a remote source", "url", *githubOwnersURL)
+		ownerLister = &urlOwners{url: *githubOwnersURL, client: &http.Client{Timeout: 30 * time.Second}}
 	}
 
 	server := newServer(*port, idb, *githubHostName)
@@ -172,9 +159,31 @@ func (h *headerFlag) Set(v string) error {
 	return nil
 }
 
-type fixedOwners []string
+// urlOwners lists owners from a remote source serving a JSON array of logins.
+type urlOwners struct {
+	url    string
+	client *http.Client
+}
 
-func (o fixedOwners) Owners(context.Context) ([]string, error) { return o, nil }
+func (u *urlOwners) Owners(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("owners source %s: %s", u.url, resp.Status)
+	}
+	var owners []string
+	if err := json.NewDecoder(resp.Body).Decode(&owners); err != nil {
+		return nil, fmt.Errorf("owners source %s: %v", u.url, err)
+	}
+	return owners, nil
+}
 
 func newGithubHTTPClient() (*http.Client, error) {
 	switch {
