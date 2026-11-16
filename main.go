@@ -21,6 +21,16 @@ var port = flag.Int("port", 8081, "port to listen on")
 var githubHostName = flag.String("githubHostName", "", "github host to query. should be your enterprise host - ex: github.mycompany.net")
 var githubBaseURL = flag.String("githubBaseURL", "", "base URL for API and raw requests, e.g. https://gitproxy.mycompany.net to route through a proxy. defaults to https://<githubHostName>. module paths and repo URLs always use -githubHostName")
 
+var githubHeaders headerFlag // -githubHeader, repeatable.
+var githubOwnerHeader = flag.String("githubOwnerHeader", "", "name of a header to set, per request, to the repository owner the request concerns. for a proxy that selects credentials per organization")
+var githubOwners = flag.String("githubOwners", "", "comma-separated owners to index. when set, the host is not enumerated for owners")
+
+// THROWAWAY, with probe.go.
+var probeEnumeration = flag.Bool("probeEnumeration", false, "log what this identity can enumerate on the github host, at startup")
+var probeEnterpriseSlug = flag.String("probeEnterpriseSlug", "", "enterprise slug to probe for organizations. skipped when empty")
+var probeOwner = flag.String("probeOwner", "", "owner to set on -githubOwnerHeader during -probeEnumeration")
+var probeOnly = flag.Bool("probeOnly", false, "exit after -probeEnumeration, without indexing. needs no database")
+
 var githubAuthToken = flag.String("githubAuthToken", "", "github personal access token. alternative to -githubTLSClientCertFile/-githubTLSClientKeyFile")
 var githubTLSClientCertFile = flag.String("githubTLSClientCertFile", "", "client certificate for mutual-TLS auth to the github host. alternative to -githubAuthToken")
 var githubTLSClientKeyFile = flag.String("githubTLSClientKeyFile", "", "client key for mutual-TLS auth to the github host")
@@ -41,6 +51,7 @@ var repoTagsReindexPeriod = flag.Duration("repoTagsReindexPeriod", 24*time.Hour,
 var repoTagsReindexTTL = flag.Duration("repoTagsReindexTTL", 10*time.Minute, "TTL that an indexing worker has for re-indexing all tags for a particular repo")
 
 func main() {
+	flag.Var(&githubHeaders, "githubHeader", "header to send on every github request, as name:value. repeatable")
 	flag.Parse()
 
 	if *githubHostName == "" {
@@ -56,6 +67,21 @@ func main() {
 
 	ctx := context.Background()
 
+	baseURL := *githubBaseURL
+	if baseURL == "" {
+		baseURL = fmt.Sprintf("https://%s", *githubHostName)
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	httpClient = github.HeaderClient(httpClient, githubHeaders, *githubOwnerHeader)
+
+	if *probeEnumeration {
+		runEnumerationProbe(ctx, baseURL, httpClient, *probeEnterpriseSlug, *probeOwner)
+	}
+	if *probeOnly {
+		return
+	}
+
 	pgUsername, pgPassword, pgHost, pgPort, pgDbname, err := postgresDetails()
 	if err != nil {
 		slog.Error(err.Error())
@@ -67,13 +93,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	baseURL := *githubBaseURL
-	if baseURL == "" {
-		baseURL = fmt.Sprintf("https://%s", *githubHostName)
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-
 	githubSCM := github.NewEnterpriseSCM(baseURL, httpClient)
+
+	var ownerLister interface {
+		Owners(context.Context) ([]string, error)
+	} = githubSCM
+	if *githubOwners != "" {
+		owners := strings.Split(*githubOwners, ",")
+		slog.Info("indexing a fixed set of owners", "owners", owners)
+		ownerLister = fixedOwners(owners)
+	}
 
 	server := newServer(*port, idb, *githubHostName)
 
@@ -81,7 +110,7 @@ func main() {
 
 	allOwnersIndexer := &indexer.AllOwnersIndexer{
 		DB:              idb,
-		Lister:          githubSCM,
+		Lister:          ownerLister,
 		WorkCheckPeriod: *allOwnersReindexWorkCheckPeriod,
 		ReindexTTL:      *allOwnersReindexTTL,
 		ReindexPeriod:   *allOwnersReindexPeriod,
@@ -125,6 +154,27 @@ func main() {
 	}
 	slog.Info("shutting down gracefully")
 }
+
+// headerFlag collects repeated name:value flags.
+type headerFlag map[string]string
+
+func (h headerFlag) String() string { return fmt.Sprint(map[string]string(h)) }
+
+func (h *headerFlag) Set(v string) error {
+	name, value, ok := strings.Cut(v, ":")
+	if !ok {
+		return fmt.Errorf("header %q is not name:value", v)
+	}
+	if *h == nil {
+		*h = headerFlag{}
+	}
+	(*h)[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	return nil
+}
+
+type fixedOwners []string
+
+func (o fixedOwners) Owners(context.Context) ([]string, error) { return o, nil }
 
 func newGithubHTTPClient() (*http.Client, error) {
 	switch {

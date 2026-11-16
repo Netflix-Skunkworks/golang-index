@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"path"
@@ -122,6 +121,8 @@ const goLanguage = "Go"
 //
 // An owner GitHub no longer knows comes back with no repos rather than an error.
 func (scm *GithubSCM) OwnerGoRepos(ctx context.Context, ownerLogin string) ([]string, error) {
+	ctx = ContextWithOwner(ctx, ownerLogin)
+
 	var names []string
 	var cursor *githubv4.String
 	for {
@@ -292,6 +293,7 @@ func (scm *GithubSCM) RepoTags(ctx context.Context, orgRepoName string) (tags []
 	if err != nil {
 		return nil, false, fmt.Errorf("RepoTags: %v", err)
 	}
+	ctx = ContextWithOwner(ctx, repo.org)
 
 	variables := map[string]any{
 		"repoOrg":    githubv4.String(repo.org),
@@ -357,6 +359,7 @@ func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (oid s
 	if err != nil {
 		return "", time.Time{}, false, fmt.Errorf("HeadCommit: %v", err)
 	}
+	ctx = ContextWithOwner(ctx, repo.org)
 
 	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
@@ -374,51 +377,60 @@ func (scm *GithubSCM) HeadCommit(ctx context.Context, orgRepoName string) (oid s
 	return string(commit.OID), commit.CommittedDate.UTC(), false, nil
 }
 
-// GoMod fetches the raw go.mod at subdir (the repo root when subdir is "") for
-// the given ref (a tag or commit). found is false, with a nil error, when the
-// repo has no such go.mod: that's a 404, which is common enough that we don't
-// treat it as an error or log it.
+// goModQuery fetches (and then holds the response for) one go.mod blob.
+type goModQuery struct {
+	Repository struct {
+		Object *struct {
+			Blob struct {
+				Text        *githubv4.String
+				IsTruncated githubv4.Boolean
+			} `graphql:"... on Blob"`
+		} `graphql:"object(expression: $expression)"`
+	} `graphql:"repository(owner: $repoOrg, name: $repoName)"`
+}
+
+// GoMod fetches the go.mod at subdir (the repo root when subdir is "") for the
+// given ref (a tag or commit). found is false, with a nil error, when the repo
+// has no such go.mod, which is common enough that we don't treat it as an error
+// or log it.
+//
+// The content comes from the GraphQL API rather than the raw endpoint: the raw
+// endpoint has no cloud equivalent, and a proxy fronting several GitHub hosts
+// is unlikely to route it.
 func (scm *GithubSCM) GoMod(ctx context.Context, orgRepoName, ref, subdir string) (content []byte, found, retryable bool, err error) {
 	repo, err := newRepo(orgRepoName)
 	if err != nil {
 		return nil, false, false, fmt.Errorf("GoMod: %v", err)
 	}
+	ctx = ContextWithOwner(ctx, repo.org)
 
 	goModPath := "go.mod"
 	if subdir != "" {
 		goModPath = subdir + "/go.mod"
 	}
 
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		fmt.Sprintf("%s/raw/%s/%s/%s/%s", scm.baseURL, repo.org, repo.name, ref, goModPath),
-		nil,
-	)
-	if err != nil {
-		return nil, false, false, fmt.Errorf("error building raw github API request: %v", err)
+	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var q goModQuery
+	variables := map[string]any{
+		"repoOrg":    githubv4.String(repo.org),
+		"repoName":   githubv4.String(repo.name),
+		"expression": githubv4.String(ref + ":" + goModPath),
+	}
+	if err := scm.graphqlClient.Query(queryCtx, &q, variables); err != nil {
+		return nil, false, true, fmt.Errorf("error querying go.mod of %s at %s: %w", repo.fullName(), ref, err)
 	}
 
-	resp, err := scm.httpClient.Do(request)
-	if err != nil {
-		return nil, false, true, fmt.Errorf("error querying raw github API for go.mod contents: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 404 {
+	// No object at that expression: no go.mod there.
+	if q.Repository.Object == nil || q.Repository.Object.Blob.Text == nil {
 		return nil, false, false, nil
 	}
-	if repoAccessDenied(resp) {
-		return nil, false, false, fmt.Errorf("access to %s denied by the raw github API", repo.fullName())
-	}
-	if resp.StatusCode != 200 {
-		return nil, false, true, fmt.Errorf("unexpected status code from raw github API. Status code: %d", resp.StatusCode)
+	if q.Repository.Object.Blob.IsTruncated {
+		return nil, false, false, fmt.Errorf("go.mod of %s at %s is too large to read", repo.fullName(), ref)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, false, true, fmt.Errorf("error reading raw github API response: %v", err)
-	}
+	bodyBytes := []byte(*q.Repository.Object.Blob.Text)
 
 	return bodyBytes, true, false, nil
 }
@@ -440,6 +452,7 @@ func (scm *GithubSCM) ModuleDirs(ctx context.Context, orgRepoName, ref string) (
 	if err != nil {
 		return nil, false, fmt.Errorf("ModuleDirs: %v", err)
 	}
+	ctx = ContextWithOwner(ctx, repo.org)
 
 	queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
