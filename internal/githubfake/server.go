@@ -41,7 +41,6 @@ func NewServer(repos ...*Repo) *Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/graphql", s.handleGraphQL)
-	mux.HandleFunc("GET /raw/{org}/{repo}/{tail...}", s.handleRaw)
 	mux.HandleFunc("GET /api/v3/repos/{org}/{repo}/git/trees/{ref...}", s.handleTrees)
 	mux.HandleFunc("GET /api/v3/users", s.handleAccounts)
 	s.handler = mux
@@ -95,6 +94,8 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		s.respondHead(w, name)
 	case strings.Contains(body.Query, "refs(refPrefix"):
 		s.respondTags(w, name)
+	case strings.Contains(body.Query, "object(expression:"):
+		s.respondGoMod(w, name, body.Variables)
 	default:
 		http.Error(w, "githubfake: unrecognized graphql query", http.StatusBadRequest)
 	}
@@ -190,23 +191,28 @@ func (s *Server) respondTags(w http.ResponseWriter, name string) {
 	}})
 }
 
-// handleRaw serves a repo file. The URL is /raw/{org}/{repo}/{ref}/{path}; since
-// the tree is ref-independent, the file is identified by matching a known path
-// against the {ref}/{path} tail (see [Repo.fileFromTail]), and the ref is ignored.
-func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
-	repo, ok := s.repo(r)
+// respondGoMod answers the go.mod blob query, object(expression: $expression).
+// The expression is "ref:path"; it resolves to a file the way [Repo.fileFromTail]
+// resolves a raw URL tail, and a missing file is a null object, not an error.
+func (s *Server) respondGoMod(w http.ResponseWriter, name string, vars map[string]json.RawMessage) {
+	repo, ok := s.repos[name]
 	if !ok {
-		http.NotFound(w, r)
+		writeData(w, map[string]any{"repository": nil})
 		return
 	}
-	data, ok := repo.fileFromTail(r.PathValue("tail"))
-	if !ok {
-		http.NotFound(w, r)
+	var expression string
+	if err := json.Unmarshal(vars["expression"], &expression); err != nil {
+		http.Error(w, fmt.Sprintf("githubfake: decoding expression variable: %v", err), http.StatusBadRequest)
 		return
 	}
-	if _, err := w.Write(data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	data, ok := repo.fileFromTail(strings.Replace(expression, ":", "/", 1))
+	if !ok {
+		writeData(w, map[string]any{"repository": map[string]any{"object": nil}})
+		return
 	}
+	writeData(w, map[string]any{"repository": map[string]any{
+		"object": map[string]any{"text": string(data), "isTruncated": false},
+	}})
 }
 
 // handleTrees serves the recursive git tree at the ref in the URL. Every file is

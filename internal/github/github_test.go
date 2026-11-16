@@ -355,34 +355,45 @@ func createTestGoModServer(t *testing.T, authToken string, tags []tagResponse) *
 			return
 		}
 
-		for _, tag := range tags {
-			if tag.goModContent == "" {
-				continue
-			}
-			if strings.HasSuffix(r.URL.Path, "/"+goModRequestPath(tag.tag)) {
-				if _, err := w.Write([]byte(tag.goModContent)); err != nil {
-					// Can't call t.Fatal off the test goroutine, so use Errorf.
-					t.Errorf("writing go.mod for %q: %v", tag.tag, err)
-				}
-				return
-			}
+		var body struct {
+			Variables map[string]json.RawMessage `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var expression string
+		if err := json.Unmarshal(body.Variables["expression"], &expression); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 
-		http.NotFound(w, r)
+		var object any
+		for _, tag := range tags {
+			if tag.goModContent != "" && expression == goModExpression(tag.tag) {
+				object = map[string]any{"text": tag.goModContent, "isTruncated": false}
+				break
+			}
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"repository": map[string]any{"object": object}},
+		}); err != nil {
+			t.Errorf("encoding go.mod response: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 
 	return server
 }
 
-// goModRequestPath is the "<ref>/<path>" part of the go.mod URL for a tag: the
-// root go.mod at "<tag>/go.mod", or the subdir go.mod at "<tag>/<subdir>/go.mod"
-// for a "<subdir>/vX.Y.Z" tag. It matches the URL GoMod builds.
-func goModRequestPath(tag string) string {
+// goModExpression is the "<ref>:<path>" expression GoMod queries for a tag: the
+// root go.mod at "<tag>:go.mod", or "<tag>:<subdir>/go.mod" for a
+// "<subdir>/vX.Y.Z" tag.
+func goModExpression(tag string) string {
 	if i := strings.LastIndex(tag, "/"); i >= 0 {
-		return tag + "/" + tag[:i] + "/go.mod"
+		return tag + ":" + tag[:i] + "/go.mod"
 	}
-	return tag + "/go.mod"
+	return tag + ":go.mod"
 }
 
 // hostRepos is a fake GitHub Enterprise host: it answers the accounts listing over
